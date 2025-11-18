@@ -1,0 +1,16 @@
+version: "3.9"
+services:
+  autocomplete-v2:
+    build:
+      context: ..
+      dockerfile: v2/Dockerfile
+    image: autocomplete-v2:latest
+    container_name: autocomplete-v2
+    environment:
+      - DATABASE_URL=sqlite:////data/autocomplete.db
+      - ASYNC_DATABASE_URL=sqlite+aiosqlite:////data/autocomplete.db
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./v2:/data
+    restart: unless-stopped

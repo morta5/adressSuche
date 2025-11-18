@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Address Autocomplete - Multi-Field Example</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            max-width: 900px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #333;
+            margin-top: 0;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            flex: 1;
+            margin-bottom: 20px;
+        }
+
+        .form-group.small {
+            flex: 0 0 150px;
+        }
+
+        .form-group.medium {
+            flex: 0 0 200px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            font-size: 16px;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+            transition: border-color 0.2s;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #4CAF50;
+        }
+
+        input[type="text"].validated {
+            border-color: #4CAF50;
+            background-color: #f1f8f4;
+        }
+
+        input[type="text"].error {
+            border-color: #f44336;
+            background-color: #ffebee;
+        }
+
+        .info {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            border-left: 4px solid #2196F3;
+        }
+
+        .result {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f9f9f9;
+            border-radius: 4px;
+            display: none;
+        }
+
+        .result.show {
+            display: block;
+        }
+
+        .result h3 {
+            margin-top: 0;
+            color: #333;
+        }
+
+        .result-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .result-item {
+            padding: 12px;
+            background: white;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+        }
+
+        .result-label {
+            font-weight: 600;
+            color: #666;
+            font-size: 12px;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
+
+        .result-value {
+            color: #333;
+            font-size: 16px;
+        }
+
+        .validation-banner {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            font-weight: 600;
+            text-align: center;
+            display: none;
+        }
+
+        .validation-banner.show {
+            display: block;
+        }
+
+        .validation-banner.valid {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .validation-banner.invalid {
+            background: #f44336;
+            color: white;
+        }
+
+        .validation-banner.corrected {
+            background: #FF9800;
+            color: white;
+        }
+
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 4px;
+            background: #4CAF50;
+            color: white;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #45a049;
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .map-preview {
+            margin-top: 20px;
+            height: 300px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+            font-style: italic;
+        }
+
+        @media (max-width: 600px) {
+            .form-row {
+                flex-direction: column;
+            }
+
+            .form-group.small,
+            .form-group.medium {
+                flex: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏠 Address Autocomplete - Multi-Field</h1>
+
+        <div class="info">
+            <strong>Hinweis:</strong> Geben Sie Teile der Adresse in die einzelnen Felder ein.
+            Die Autovervollständigung funktioniert für alle Felder. Nach Auswahl einer Suggestion
+            wird automatisch das Hausnummer-Feld fokussiert. Nach vollständiger Eingabe erfolgt
+            eine automatische Validierung.
+        </div>
+
+        <form id="address-form">
+            <div class="form-row">
+                <div class="form-group" style="flex: 2;">
+                    <label for="street-input">Straße:</label>
+                    <input
+                        type="text"
+                        id="street-input"
+                        placeholder="z.B. Hauptstraße"
+                        autocomplete="off"
+                    >
+                </div>
+
+                <div class="form-group small">
+                    <label for="housenumber-input">Hausnummer:</label>
+                    <input
+                        type="text"
+                        id="housenumber-input"
+                        placeholder="z.B. 42"
+                        autocomplete="off"
+                    >
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group small">
+                    <label for="postcode-input">PLZ:</label>
+                    <input
+                        type="text"
+                        id="postcode-input"
+                        placeholder="z.B. 10115"
+                        autocomplete="off"
+                    >
+                </div>
+
+                <div class="form-group">
+                    <label for="city-input">Stadt:</label>
+                    <input
+                        type="text"
+                        id="city-input"
+                        placeholder="z.B. Berlin"
+                        autocomplete="off"
+                    >
+                </div>
+            </div>
+
+            <button type="button" onclick="validateCurrentAddress()">
+                🔍 Adresse jetzt validieren
+            </button>
+        </form>
+
+        <div class="validation-banner" id="validation-banner"></div>
+
+        <div class="result" id="result">
+            <h3>✅ Validierte Adresse:</h3>
+            <div class="result-grid">
+                <div class="result-item">
+                    <div class="result-label">Straße</div>
+                    <div class="result-value" id="result-street">-</div>
+                </div>
+                <div class="result-item">
+                    <div class="result-label">Hausnummer</div>
+                    <div class="result-value" id="result-housenumber">-</div>
+                </div>
+                <div class="result-item">
+                    <div class="result-label">PLZ</div>
+                    <div class="result-value" id="result-postcode">-</div>
+                </div>
+                <div class="result-item">
+                    <div class="result-label">Stadt</div>
+                    <div class="result-value" id="result-city">-</div>
+                </div>
+                <div class="result-item">
+                    <div class="result-label">Koordinaten</div>
+                    <div class="result-value" id="result-coords">-</div>
+                </div>
+                <div class="result-item">
+                    <div class="result-label">Distanz</div>
+                    <div class="result-value" id="result-distance">-</div>
+                </div>
+            </div>
+
+            <div class="map-preview" id="map-preview">
+                Kartenvorschau (kann mit Leaflet/OpenStreetMap integriert werden)
+            </div>
+        </div>
+    </div>
+
+    <!-- Include the library -->
+    <script src="../address-autocomplete.js"></script>
+
+    <script>
+        // Initialize the address autocomplete with multi-field mode
+        const autocomplete = new AddressAutocomplete({
+            // Multiple input fields
+            inputs: {
+                street: '#street-input',
+                housenumber: '#housenumber-input',
+                postcode: '#postcode-input',
+                city: '#city-input'
+            },
+
+            // API URL (adjust this to your API endpoint)
+            apiUrl: 'http://localhost:8001',
+
+            // Enable validation after address selection
+            validateOnComplete: true,
+
+            // Callback after address is selected from suggestions
+            onComplete: function(address) {
+                console.log('Address selected:', address);
+
+                // Visual feedback
+                highlightFields('success');
+
+                // Show the result section
+                displayAddress(address);
+            },
+
+            // Callback after validation
+            onValidate: function(validationResult) {
+                console.log('Validation result:', validationResult);
+
+                const banner = document.getElementById('validation-banner');
+                banner.classList.remove('valid', 'invalid', 'corrected');
+                banner.classList.add('show');
+
+                if (validationResult.exists) {
+                    banner.classList.add('valid');
+                    banner.innerHTML = '✅ Adresse gefunden!';
+
+                    document.getElementById('street-input').value = validationResult.street || '';
+                    document.getElementById('housenumber-input').value = validationResult.housenumber || '';
+                    document.getElementById('postcode-input').value = validationResult.postcode || '';
+                    document.getElementById('city-input').value = validationResult.city || '';
+
+                    highlightFields('success');
+                    displayAddress(validationResult);
+                } else {
+                    banner.classList.add('invalid');
+                    banner.innerHTML = '❌ Adresse nicht gefunden oder ungültig';
+                    highlightFields('error');
+                }
+
+                // Auto-hide banner after 5 seconds
+                setTimeout(() => {
+                    banner.classList.remove('show');
+                }, 5000);
+            },
+
+            // Debounce delay in milliseconds
+            debounceMs: 300,
+
+            // Minimum characters before showing suggestions
+            minChars: 2,
+
+            // Maximum number of suggestions
+            maxSuggestions: 10,
+
+            // Theme
+            theme: 'light',
+
+            // Always show hint to add house number
+            appendHousenumber: true
+        });
+
+        // Helper function to highlight input fields
+        function highlightFields(status) {
+            const inputs = ['street-input', 'housenumber-input', 'postcode-input', 'city-input'];
+            inputs.forEach(id => {
+                const input = document.getElementById(id);
+                input.classList.remove('validated', 'error');
+                if (status === 'success') {
+                    input.classList.add('validated');
+                } else if (status === 'error') {
+                    input.classList.add('error');
+                }
+            });
+        }
+
+        // Helper function to display address in result section
+        function displayAddress(address) {
+            document.getElementById('result-street').textContent = address.street || '-';
+            document.getElementById('result-housenumber').textContent = address.housenumber || '-';
+            document.getElementById('result-postcode').textContent = address.postcode || '-';
+            document.getElementById('result-city').textContent = address.city || '-';
+
+            if (
+                typeof address.longitude === 'number' &&
+                typeof address.latitude === 'number'
+            ) {
+                document.getElementById('result-coords').textContent =
+                    `${address.longitude.toFixed(6)}, ${address.latitude.toFixed(6)}`;
+
+                document.getElementById('map-preview').innerHTML =
+                    `📍 Lon: ${address.longitude.toFixed(6)}, Lat: ${address.latitude.toFixed(6)}<br>` +
+                    `<small style="color: #999;">OpenStreetMap-Integration möglich</small>`;
+            } else {
+                document.getElementById('result-coords').textContent = '-';
+                document.getElementById('map-preview').textContent =
+                    'Kartenvorschau (kann mit Leaflet/OpenStreetMap integriert werden)';
+            }
+
+            if (
+                typeof address.distanceKm === 'number' &&
+                Number.isFinite(address.distanceKm)
+            ) {
+                document.getElementById('result-distance').textContent =
+                    `${address.distanceKm.toFixed(1)} km`;
+            } else {
+                document.getElementById('result-distance').textContent = '-';
+            }
+
+            document.getElementById('result').classList.add('show');
+        }
+
+        // Manual validation function
+        function validateCurrentAddress() {
+            autocomplete.complete();
+        }
+
+        // Trigger validation when housenumber is entered and Enter is pressed
+        document.getElementById('housenumber-input').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                validateCurrentAddress();
+            }
+        });
+
+        // Example: Use geolocation for proximity search
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(function(position) {
+                autocomplete.updateConfig({
+                    proximity: {
+                        lat: position.coords.latitude,
+                        lon: position.coords.longitude
+                    }
+                });
+                console.log('Proximity search enabled');
+            }, function(error) {
+                console.log('Geolocation not available:', error.message);
+            });
+        }
+
+        // Example: Switch to dark theme
+        // autocomplete.updateConfig({ theme: 'dark' });
+
+        // Example: Disable validation on complete
+        // autocomplete.updateConfig({ validateOnComplete: false });
+    </script>
+</body>
+<!-- Attribution for data sources, required by license -->
+<footer style="margin: 32px auto 0; max-width: 900px; text-align: left; color: #888; font-size: 13px;">
+  Adressen: <a href="https://arcg.is/0nXTyK" target="_blank" rel="noopener">Esri Deutschland (CC BY 4.0)</a>,
+  <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap (ODbL)</a>
+</footer>
+</html>

@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+venv*/
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+site/
+autocomplete.db
+# Tooling / Type Checking / Linting
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.pylint.d/
+
+# Testing / Coverage
+.tox/
+.nox/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+nosetests.xml
+junit*.xml
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Database
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+.python-version
+
+# Logs & temp
+*.log
+logs/
+tmp/
+temp/
+
+# Node / frontend (if present)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Alembic (keep migrations, ignore caches/compiled)
+alembic/**/__pycache__/
+alembic/versions/*.pyc
+alembic/versions/*.pyo
