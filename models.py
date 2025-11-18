@@ -13,8 +13,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship
 
-from advanced_search.phonetic import german_phonetic_phrase, cologne_phonetic_phrase
-from .utils import normalize_compact, normalize_string, consonant_key
+from phonetic import german_phonetic_phrase, cologne_phonetic_phrase
+from utils import normalize_compact, normalize_string, consonant_key
 
 Base = declarative_base()
 

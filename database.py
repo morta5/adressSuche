@@ -11,9 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 from sqlalchemy.orm import sessionmaker
 import aiosqlite
 
-from advanced_search.phonetic import german_phonetic_phrase, cologne_phonetic_phrase
-from .models import Base
-from .utils import (
+from phonetic import german_phonetic_phrase, cologne_phonetic_phrase
+from models import Base
+from utils import (
     calculate_fuzzy_score,
     calculate_fuzzy_score_normalized,
     haversine_distance,
@@ -233,6 +233,10 @@ AsyncSessionLocal = async_sessionmaker(
 
 def init_db():
     """Initialize the database by creating all tables and ensuring derived columns."""
+    # Ensure database directory exists
+    db_path = Path("./autocomplete.db")
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    
     Base.metadata.create_all(bind=engine)
     _ensure_street_normalized_column()
     _ensure_phonetic_columns()

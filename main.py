@@ -8,18 +8,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .database import get_async_db, init_db
-from .models import Street, Address
-from .schemas import StreetAutocompleteResponse, AddressValidationResponse
-from .utils import (
+from query_processor import QueryProcessor
+from phonetic import phonetic_match_score, phonetic_forms
+
+from database import get_async_db, init_db
+from models import Street, Address
+from schemas import StreetAutocompleteResponse, AddressValidationResponse
+from utils import (
     haversine_distance,
     normalize_string,
     normalize_compact,
     calculate_fuzzy_score_normalized,
     consonant_key,
 )
-from advanced_search.query_processor import QueryProcessor
-from advanced_search.phonetic import phonetic_match_score, phonetic_forms
 
 
 async def _geo_bounds(lat: float, lon: float, radius_km: float) -> Tuple[float, float, float, float]:
@@ -458,4 +459,4 @@ def _to_response(s: Street, lat: Optional[float], lon: Optional[float]) -> Stree
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("v2.main:app", host="0.0.0.0", port=8001, workers=4)
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, workers=4)
