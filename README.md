@@ -21,6 +21,12 @@ This project provides an advanced address autocomplete API and frontend widget, 
 
 ## Quick Start
 
+### Pre-built Database
+A pre-populated database with address data is available for download:
+https://cloud.farshidhakimy.de/s/ScfdTePfPc3oaR6
+
+Download and place it in your project directory before starting the server.
+
 ### Local
 ```bash
 python -m v2.main
