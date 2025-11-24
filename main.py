@@ -22,6 +22,16 @@ from utils import (
     consonant_key,
 )
 
+# Import the new fuzzy search module
+try:
+    from fuzzy_search import FuzzySearchIndex, get_fuzzy_index
+    FUZZY_SEARCH_AVAILABLE = True
+except ImportError:
+    FUZZY_SEARCH_AVAILABLE = False
+
+# Global fuzzy index (lazy loaded)
+_fuzzy_index: Optional["FuzzySearchIndex"] = None
+
 
 async def _geo_bounds(lat: float, lon: float, radius_km: float) -> Tuple[float, float, float, float]:
     lat_deg = radius_km / 110.574
@@ -104,9 +114,30 @@ app.add_middleware(
 )
 
 
+def _load_fuzzy_index() -> Optional["FuzzySearchIndex"]:
+    """Load the fuzzy search index if available."""
+    global _fuzzy_index
+    if _fuzzy_index is not None:
+        return _fuzzy_index
+    
+    if not FUZZY_SEARCH_AVAILABLE:
+        return None
+    
+    try:
+        _fuzzy_index = get_fuzzy_index()
+        if len(_fuzzy_index.streets) > 0:
+            return _fuzzy_index
+    except Exception:
+        pass
+    
+    return None
+
+
 @app.on_event("startup")
 async def _on_startup():
     init_db()
+    # Try to load fuzzy index on startup
+    _load_fuzzy_index()
 
 
 @app.get("/")
@@ -339,16 +370,65 @@ async def autocomplete(
         local.sort(key=lambda t: (-t[1], t[0].name, t[0].city))
         return local[: max(limit * 5, 50)]
 
+    # Stage F: BK-Tree fuzzy search using Levenshtein distance
+    def bktree_fuzzy_search() -> list[tuple[StreetAutocompleteResponse, float, int]]:
+        """Use BK-Tree index for typo-tolerant search with Levenshtein distance."""
+        fuzzy_idx = _load_fuzzy_index()
+        if fuzzy_idx is None or len(fuzzy_idx.streets) == 0:
+            return []
+        
+        local: list[tuple[StreetAutocompleteResponse, float, int]] = []
+        try:
+            # Search with max_distance=2 for typo tolerance
+            results = fuzzy_idx.search(
+                query=query,
+                max_distance=2,
+                city=city,
+                limit=max(limit * 5, 50),
+                include_scores=True
+            )
+            
+            for street_data in results:
+                street_id = street_data.get('id')
+                if street_id is None:
+                    continue
+                
+                base_score = street_data.get('match_score', 0.7)
+                
+                resp = StreetAutocompleteResponse(
+                    street_id=int(street_id),
+                    name=str(street_data.get('name', '')),
+                    city=str(street_data.get('city', '')),
+                    postal_code=street_data.get('postal_code'),
+                    latitude=float(street_data.get('latitude', 0)),
+                    longitude=float(street_data.get('longitude', 0)),
+                    match_score=base_score,
+                )
+                
+                if latitude is not None and longitude is not None:
+                    d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                    resp.distance_km = round(d, 2)
+                    base_score = _distance_penalized(base_score, d)
+                
+                local.append((resp, base_score, street_id))
+        except Exception:
+            # Silently fall back to other stages if BK-Tree fails
+            pass
+        
+        return local
+
     # Run retrieval stages sequentially to avoid concurrent DB operations on the same session
     stage_a = await exact_prefix()
     stage_b = await trigram_search()
     stage_c = await sql_typos()
     stage_d = await phonetic_stage()
+    # Stage F: BK-Tree fuzzy search (sync, runs quickly from in-memory index)
+    stage_f = bktree_fuzzy_search()
     # If everything above is weak, run a broad prefix fallback to guarantee recall
     stage_e = []
-    if not (stage_a or stage_b or stage_c or stage_d):
+    if not (stage_a or stage_b or stage_c or stage_d or stage_f):
         stage_e = await broad_prefix_fallback()
-    flat: list[tuple[StreetAutocompleteResponse, float, int]] = [*stage_a, *stage_b, *stage_c, *stage_d, *stage_e]
+    flat: list[tuple[StreetAutocompleteResponse, float, int]] = [*stage_a, *stage_b, *stage_c, *stage_d, *stage_f, *stage_e]
 
     # Dedup + keep best score
     by_id: Dict[int, tuple[StreetAutocompleteResponse, float]] = {}

@@ -645,6 +645,15 @@ def main() -> None:
         session.commit()
 
     print('Import completed.')
+    
+    # Rebuild fuzzy search index after import
+    print()
+    print('Rebuilding fuzzy search index...')
+    try:
+        from database import rebuild_fuzzy_index
+        rebuild_fuzzy_index(verbose=True)
+    except Exception as e:
+        print(f'Warning: Could not rebuild fuzzy index: {e}')
 
 
 if __name__ == '__main__':

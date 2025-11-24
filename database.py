@@ -244,6 +244,29 @@ def init_db():
     _ensure_spellfix_index()
 
 
+def rebuild_fuzzy_index(verbose: bool = True) -> bool:
+    """Rebuild the BK-Tree fuzzy search index from the database.
+    
+    Args:
+        verbose: Print progress information
+        
+    Returns:
+        True if index was successfully rebuilt, False otherwise
+    """
+    try:
+        from build_fuzzy_index import build_index
+        build_index(force=True, verbose=verbose)
+        return True
+    except ImportError:
+        if verbose:
+            print("Warning: build_fuzzy_index module not available")
+        return False
+    except Exception as e:
+        if verbose:
+            print(f"Warning: Failed to rebuild fuzzy index: {e}")
+        return False
+
+
 def get_db():
     """Get database session dependency for FastAPI."""
     db = SessionLocal()
