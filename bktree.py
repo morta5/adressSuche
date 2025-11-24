@@ -18,8 +18,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+# Constants for tree operations
+DEFAULT_MAX_DISTANCE = 10
+INSERT_MAX_DISTANCE = 50  # Maximum distance for tree insertion (allows most valid strings)
 
-def levenshtein_distance(s1: str, s2: str, max_dist: int = 10) -> int:
+
+def levenshtein_distance(s1: str, s2: str, max_dist: int = DEFAULT_MAX_DISTANCE) -> int:
     """Calculate Levenshtein distance with early termination.
     
     Args:
@@ -136,7 +140,7 @@ class BKTree:
         
         node = self.root
         while True:
-            dist = self.distance_fn(word, node.word, max_dist=100)
+            dist = self.distance_fn(word, node.word, max_dist=INSERT_MAX_DISTANCE)
             
             if dist == 0:
                 # Word already exists, update data if provided

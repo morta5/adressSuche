@@ -1,5 +1,6 @@
 """Advanced Street Autocomplete API v2."""
 import asyncio
+import logging
 import math
 from typing import List, Optional, Tuple, Dict, Any
 
@@ -13,6 +14,9 @@ from phonetic import phonetic_match_score, phonetic_forms
 
 from database import get_async_db, init_db
 from models import Street, Address
+
+# Configure logging
+logger = logging.getLogger(__name__)
 from schemas import StreetAutocompleteResponse, AddressValidationResponse
 from utils import (
     haversine_distance,
@@ -29,8 +33,10 @@ try:
 except ImportError:
     FUZZY_SEARCH_AVAILABLE = False
 
-# Global fuzzy index (lazy loaded)
+# Thread-safe lazy loading of fuzzy index using threading.Lock
+import threading
 _fuzzy_index: Optional["FuzzySearchIndex"] = None
+_fuzzy_index_lock = threading.Lock()
 
 
 async def _geo_bounds(lat: float, lon: float, radius_km: float) -> Tuple[float, float, float, float]:
@@ -115,20 +121,29 @@ app.add_middleware(
 
 
 def _load_fuzzy_index() -> Optional["FuzzySearchIndex"]:
-    """Load the fuzzy search index if available."""
+    """Load the fuzzy search index if available (thread-safe)."""
     global _fuzzy_index
+    
+    # Fast path: already loaded
     if _fuzzy_index is not None:
         return _fuzzy_index
     
     if not FUZZY_SEARCH_AVAILABLE:
         return None
     
-    try:
-        _fuzzy_index = get_fuzzy_index()
-        if len(_fuzzy_index.streets) > 0:
+    # Thread-safe initialization
+    with _fuzzy_index_lock:
+        # Double-check after acquiring lock
+        if _fuzzy_index is not None:
             return _fuzzy_index
-    except Exception:
-        pass
+        
+        try:
+            loaded_index = get_fuzzy_index()
+            if len(loaded_index.streets) > 0:
+                _fuzzy_index = loaded_index
+                return _fuzzy_index
+        except Exception:
+            pass
     
     return None
 
@@ -411,9 +426,9 @@ async def autocomplete(
                     base_score = _distance_penalized(base_score, d)
                 
                 local.append((resp, base_score, street_id))
-        except Exception:
-            # Silently fall back to other stages if BK-Tree fails
-            pass
+        except Exception as e:
+            # Log the error for debugging but continue with other stages
+            logger.debug(f"BK-Tree search failed: {e}")
         
         return local
 

@@ -36,6 +36,13 @@ from utils import (
 DEFAULT_INDEX_PATH = Path(os.getenv("FUZZY_INDEX_PATH", "./fuzzy_index"))
 DEFAULT_BKTREE_PATH = DEFAULT_INDEX_PATH / "bktree"
 
+# Score weights for final ranking (should sum to 1.0)
+SCORE_WEIGHT_BASE = 0.45       # Weight for BK-Tree base score
+SCORE_WEIGHT_PHONETIC = 0.35  # Weight for phonetic similarity
+SCORE_WEIGHT_FUZZY = 0.20     # Weight for fuzzy string matching
+PREFIX_MATCH_BONUS = 0.15     # Bonus for exact prefix matches
+PARTIAL_PREFIX_BONUS = 0.05   # Bonus for partial prefix matches
+
 
 class FuzzySearchIndex:
     """High-performance fuzzy search index for street names.
@@ -374,11 +381,11 @@ class FuzzySearchIndex:
         street_search = normalize_string(street_name)
         _, fuzzy_score = calculate_fuzzy_score_normalized(query_search, street_search)
         
-        # Weighted combination
+        # Weighted combination using configured weights
         final_score = (
-            0.45 * base_score +
-            0.35 * phonetic_score +
-            0.20 * fuzzy_score
+            SCORE_WEIGHT_BASE * base_score +
+            SCORE_WEIGHT_PHONETIC * phonetic_score +
+            SCORE_WEIGHT_FUZZY * fuzzy_score
         )
         
         # Boost for exact prefix matches
@@ -386,9 +393,9 @@ class FuzzySearchIndex:
         street_compact = normalize_compact(street_name).lower()
         
         if street_compact.startswith(query_compact):
-            final_score = min(1.0, final_score + 0.15)
+            final_score = min(1.0, final_score + PREFIX_MATCH_BONUS)
         elif query_compact.startswith(street_compact[:len(query_compact)]):
-            final_score = min(1.0, final_score + 0.05)
+            final_score = min(1.0, final_score + PARTIAL_PREFIX_BONUS)
         
         return min(1.0, max(0.0, final_score))
     
