@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import math
+import sqlite3
 from typing import List, Optional, Tuple, Dict, Any
 
 from fastapi import Depends, FastAPI, Query
@@ -114,6 +115,64 @@ def _collect_phonetic_codes(candidates: List[str]) -> Tuple[List[str], List[str]
     return german_codes, cologne_codes
 
 
+# Cache for known city names (lazy loaded)
+_known_cities: set[str] | None = None
+_known_cities_lock = threading.Lock()
+
+
+def _get_known_cities(db_path: str = "./autocomplete.db") -> set[str]:
+    """Load known city names from the database (cached, case-insensitive)."""
+    global _known_cities
+    
+    if _known_cities is not None:
+        return _known_cities
+    
+    with _known_cities_lock:
+        if _known_cities is not None:
+            return _known_cities
+        
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT city FROM streets WHERE city IS NOT NULL")
+            cities = {row[0].lower() for row in cursor.fetchall() if row[0]}
+            conn.close()
+            _known_cities = cities
+            return _known_cities
+        except Exception as e:
+            logger.debug(f"Failed to load cities: {e}")
+            return set()
+
+
+def _extract_city_from_query(query: str, known_cities: set[str]) -> Tuple[str, Optional[str]]:
+    """
+    Extract city name from the end of query if present.
+    
+    For query "jungfernstieg hamburg", returns ("jungfernstieg", "Hamburg").
+    For query "hauptstraße berlin mitte", returns ("hauptstraße", "Berlin Mitte").
+    For query "bahnhofstraße", returns ("bahnhofstraße", None).
+    
+    Returns:
+        Tuple of (street_query, detected_city)
+    """
+    parts = query.strip().split()
+    if len(parts) < 2:
+        return query, None
+    
+    # Try to match last N words as a city (N from 1 to min(3, len(parts)-1))
+    for n in range(min(3, len(parts) - 1), 0, -1):
+        potential_city = " ".join(parts[-n:]).lower()
+        
+        # Check if this is a known city
+        if potential_city in known_cities:
+            street_query = " ".join(parts[:-n])
+            # Return city with original casing from query
+            detected_city = " ".join(parts[-n:])
+            return street_query, detected_city
+    
+    return query, None
+
+
 app = FastAPI(
     title="Street Autocomplete API v2",
     description="Advanced search with query understanding, phonetics and multi-stage fuzzy matching",
@@ -178,6 +237,15 @@ async def autocomplete(
     limit: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_async_db),
 ):
+    # Extract city from query if not provided explicitly
+    # E.g., "jungfernstieg hamburg" -> query="jungfernstieg", city="hamburg"
+    if city is None:
+        known_cities = _get_known_cities()
+        query, detected_city = _extract_city_from_query(query, known_cities)
+        if detected_city:
+            city = detected_city
+            logger.debug(f"Extracted city '{city}' from query, street query: '{query}'")
+    
     qc = normalize_compact(query)
     qn = normalize_string(query)
 
