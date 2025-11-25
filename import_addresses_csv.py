@@ -322,6 +322,8 @@ def import_addresses(csv_path: str, commit_every: int = 1000, dry_run: bool = Fa
     print(f"Addresses inserted: {inserted_addresses}")
     print(f"Addresses skipped (existing): {skipped_existing}")
     print(f"Rows skipped (no coords): {skipped_no_coords}")
+    
+
 
 
 def preview_csv(csv_path: str, rows: int = 5) -> None:

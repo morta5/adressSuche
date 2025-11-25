@@ -645,6 +645,9 @@ def main() -> None:
         session.commit()
 
     print('Import completed.')
+    
+    # Rebuild fuzzy search index after import
+
 
 
 if __name__ == '__main__':

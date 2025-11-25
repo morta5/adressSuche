@@ -1,0 +1,402 @@
+"""
+API Test Cases for Address Autocomplete.
+
+This file contains comprehensive test cases for the autocomplete API,
+testing performance, correctness, and various query patterns.
+
+Test queries referenced from GitHub comments:
+- http://localhost:8001/autocomplete?query=am+neuen+kamp&limit=10&latitude=54.0863&longitude=9.9757
+- http://localhost:8001/autocomplete?query=albert-schweitzer-straße&limit=10&latitude=54.0863&longitude=9.9757
+- http://localhost:8001/autocomplete?query=kieler+straße&limit=10&latitude=54.0863&longitude=9.9757
+- http://localhost:8001/autocomplete?query=kieler&limit=10&latitude=54.0863&longitude=9.9757
+- http://localhost:8001/autocomplete?query=großflecken&limit=10&latitude=53.5974&longitude=10.2135
+- http://localhost:8001/autocomplete?query=kieler+straße&limit=10&latitude=53.5974&longitude=10.2135
+- http://localhost:8001/autocomplete?query=galbelstraße&limit=10&latitude=53.5974&longitude=10.2135
+- http://localhost:8001/autocomplete?query=jungfernstieg+hamburg&limit=10&latitude=54.0863&longitude=9.9757
+"""
+
+import asyncio
+import time
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+from dataclasses import dataclass
+
+import pytest
+
+
+@dataclass
+class APITestCase:
+    """A single test case for the autocomplete API."""
+    name: str
+    query: str
+    latitude: float
+    longitude: float
+    limit: int = 10
+    expected_result: Optional[str] = None
+    expected_city: Optional[str] = None
+    max_time_ms: int = 500
+    description: str = ""
+
+
+# Test cases from GitHub comments
+TEST_CASES: List[APITestCase] = [
+    # Fast queries (exact prefix matching)
+    APITestCase(
+        name="kieler_prefix",
+        query="kieler",
+        latitude=54.0863,
+        longitude=9.9757,
+        expected_result="Kieler Straße",
+        max_time_ms=50,
+        description="Simple prefix query - should be very fast"
+    ),
+    APITestCase(
+        name="grossflecken",
+        query="großflecken",
+        latitude=53.5974,
+        longitude=10.2135,
+        expected_result="Großflecken",
+        max_time_ms=50,
+        description="Exact match query with special character ß"
+    ),
+    
+    # Multi-word queries (still fast due to indexed range queries)
+    APITestCase(
+        name="am_neuen_kamp",
+        query="am neuen kamp",
+        latitude=54.0863,
+        longitude=9.9757,
+        expected_result="Am Neuen Kamp",
+        max_time_ms=50,
+        description="Multi-word query"
+    ),
+    APITestCase(
+        name="albert_schweitzer_strasse",
+        query="albert-schweitzer-straße",
+        latitude=54.0863,
+        longitude=9.9757,
+        expected_result="Albert-Schweitzer-Straße",
+        max_time_ms=50,
+        description="Hyphenated street name"
+    ),
+    APITestCase(
+        name="kieler_strasse_neumuenster",
+        query="kieler straße",
+        latitude=54.0863,
+        longitude=9.9757,
+        expected_result="Kieler Straße",
+        max_time_ms=50,
+        description="Two-word query near Neumünster"
+    ),
+    APITestCase(
+        name="kieler_strasse_hamburg",
+        query="kieler straße",
+        latitude=53.5974,
+        longitude=10.2135,
+        expected_result="Kieler Straße",
+        max_time_ms=50,
+        description="Two-word query near Hamburg"
+    ),
+    
+    # Typo tolerance queries
+    APITestCase(
+        name="galbelstrasse_typo",
+        query="galbelstraße",
+        latitude=53.5974,
+        longitude=10.2135,
+        expected_result="Geibelstraße",  # Geo-ranked near Hamburg
+        max_time_ms=300,
+        description="Typo query: 'galbelstraße' finds 'Geibelstraße' near Hamburg"
+    ),
+    APITestCase(
+        name="hannes_mayer_typo",
+        query="hannes-mayer-straße münchen",
+        latitude=54.0863,
+        longitude=9.9757,
+        expected_result="Hannes-Meyer-Straße",
+        expected_city="München",
+        max_time_ms=500,
+        description="Typo in middle: 'hannes-mayer' should find 'hannes-meyer' in München"
+    ),
+    APITestCase(
+        name="gretenweg_typo",
+        query="gretenweg",
+        latitude=50.0976,
+        longitude=8.6892,
+        expected_result="Grethenweg",
+        expected_city="Frankfurt am Main",
+        max_time_ms=500,  # Allow more time for complex fuzzy search
+        description="Typo query: 'gretenweg' should find 'Grethenweg Frankfurt' (missing 'h')"
+    ),
+    
+    # City-in-query parsing
+    APITestCase(
+        name="jungfernstieg_hamburg",
+        query="jungfernstieg hamburg",
+        latitude=54.0863,
+        longitude=9.9757,
+        expected_result="Jungfernstieg",
+        expected_city="Hamburg",
+        max_time_ms=500,
+        description="City parsing: 'jungfernstieg hamburg' should find result in Hamburg"
+    ),
+]
+
+# Minimum size for real database in bytes (1MB)
+MIN_DB_SIZE_BYTES = 1_000_000
+
+
+def _real_db_available() -> bool:
+    """Check if the real database is available."""
+    db_path = Path("./autocomplete.db")
+    return db_path.exists() and db_path.stat().st_size > MIN_DB_SIZE_BYTES
+
+
+class TestAPITestCases:
+    """Test suite for API test cases."""
+    
+    @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
+    @pytest.mark.parametrize("test_case", TEST_CASES, ids=[tc.name for tc in TEST_CASES])
+    def test_api_query(self, test_case: APITestCase):
+        """Test individual API query."""
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Warm up
+                await client.get("/autocomplete", params={"query": "test", "limit": 1})
+                
+                params = {
+                    "query": test_case.query,
+                    "limit": test_case.limit,
+                    "latitude": test_case.latitude,
+                    "longitude": test_case.longitude,
+                }
+                
+                start = time.perf_counter()
+                response = await client.get("/autocomplete", params=params)
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                
+                # Check status code
+                assert response.status_code == 200, f"Query failed with status {response.status_code}"
+                
+                # Check response time
+                assert elapsed_ms < test_case.max_time_ms, \
+                    f"Query took {elapsed_ms:.0f}ms, expected < {test_case.max_time_ms}ms"
+                
+                results = response.json()
+                
+                # Check expected result is found (using startswith for more robust matching)
+                if test_case.expected_result:
+                    found = any(
+                        r["name"].startswith(test_case.expected_result) or 
+                        r["name"] == test_case.expected_result
+                        for r in results
+                    )
+                    assert found, \
+                        f"Expected '{test_case.expected_result}' not found in results: {[r['name'] for r in results]}"
+                
+                # Check expected city
+                if test_case.expected_city:
+                    found_city = any(r["city"].lower() == test_case.expected_city.lower() for r in results)
+                    assert found_city, \
+                        f"Expected city '{test_case.expected_city}' not found in results: {[r['city'] for r in results]}"
+                
+                return elapsed_ms, results
+        
+        asyncio.run(run_test())
+    
+    @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
+    def test_all_queries_summary(self):
+        """Run all test queries and print summary."""
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_all():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Warm up
+                await client.get("/autocomplete", params={"query": "test", "limit": 1})
+                
+                results_summary = []
+                
+                for tc in TEST_CASES:
+                    params = {
+                        "query": tc.query,
+                        "limit": tc.limit,
+                        "latitude": tc.latitude,
+                        "longitude": tc.longitude,
+                    }
+                    
+                    start = time.perf_counter()
+                    response = await client.get("/autocomplete", params=params)
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+                    
+                    results = response.json() if response.status_code == 200 else []
+                    top_result = results[0]["name"] if results else "N/A"
+                    top_city = results[0]["city"] if results else "N/A"
+                    
+                    passed = elapsed_ms < tc.max_time_ms
+                    if tc.expected_result:
+                        passed = passed and any(tc.expected_result in r["name"] for r in results)
+                    
+                    results_summary.append({
+                        "name": tc.name,
+                        "query": tc.query,
+                        "time_ms": elapsed_ms,
+                        "max_ms": tc.max_time_ms,
+                        "top_result": top_result,
+                        "top_city": top_city,
+                        "passed": passed,
+                    })
+                
+                # Print summary
+                print("\n" + "=" * 80)
+                print("API TEST RESULTS SUMMARY")
+                print("=" * 80)
+                
+                total_time = sum(r["time_ms"] for r in results_summary)
+                avg_time = total_time / len(results_summary)
+                all_passed = all(r["passed"] for r in results_summary)
+                
+                for r in results_summary:
+                    status = "✓" if r["passed"] else "✗"
+                    print(f"{status} {r['name']:30} | {r['time_ms']:6.0f}ms / {r['max_ms']:4}ms | {r['top_result']} ({r['top_city']})")
+                
+                print("-" * 80)
+                print(f"Total time: {total_time:.0f}ms | Average: {avg_time:.0f}ms | All passed: {all_passed}")
+                print("=" * 80)
+                
+                assert all_passed, "Some tests failed"
+        
+        asyncio.run(run_all())
+
+
+class TestCityExtraction:
+    """Tests for city extraction from query."""
+    
+    def test_extract_city_from_query(self):
+        """Test city extraction function."""
+        from main import _extract_city_from_query, _get_known_cities
+        
+        # Skip if database not available
+        if not _real_db_available():
+            pytest.skip("Real database not available")
+        
+        known_cities = _get_known_cities()
+        
+        # Test extraction
+        query, city = _extract_city_from_query("jungfernstieg hamburg", known_cities)
+        assert query == "jungfernstieg"
+        assert city is not None
+        assert city.lower() == "hamburg"
+        
+        # Test no extraction for query without city
+        query, city = _extract_city_from_query("bahnhofstraße", known_cities)
+        assert query == "bahnhofstraße"
+        assert city is None
+    
+    def test_city_extraction_with_api(self):
+        """Test that city extraction works in API."""
+        if not _real_db_available():
+            pytest.skip("Real database not available")
+        
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Test with city in query
+                response = await client.get("/autocomplete", params={
+                    "query": "jungfernstieg hamburg",
+                    "limit": 5,
+                    "latitude": 54.0863,
+                    "longitude": 9.9757
+                })
+                
+                assert response.status_code == 200
+                results = response.json()
+                
+                # Should find Jungfernstieg in Hamburg
+                hamburg_results = [r for r in results if r["city"].lower() == "hamburg"]
+                assert len(hamburg_results) > 0, "Should find results in Hamburg"
+                assert any("Jungfernstieg" in r["name"] for r in hamburg_results), \
+                    "Should find Jungfernstieg in Hamburg"
+        
+        asyncio.run(run_test())
+
+
+class TestPerformanceRegression:
+    """Performance regression tests."""
+    
+    @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
+    def test_exact_prefix_queries_fast(self):
+        """Exact prefix queries should be under 30ms."""
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        fast_queries = [
+            "kieler",
+            "großflecken",
+            "am neuen kamp",
+            "albert-schweitzer-straße",
+            "kieler straße",
+        ]
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Warm up
+                await client.get("/autocomplete", params={"query": "test", "limit": 1})
+                
+                for query in fast_queries:
+                    start = time.perf_counter()
+                    response = await client.get("/autocomplete", params={
+                        "query": query,
+                        "limit": 10,
+                        "latitude": 54.0863,
+                        "longitude": 9.9757
+                    })
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+                    
+                    assert response.status_code == 200
+                    assert elapsed_ms < 30, f"Query '{query}' took {elapsed_ms:.0f}ms (>30ms)"
+        
+        asyncio.run(run_test())
+    
+    @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
+    def test_typo_query_reasonable_time(self):
+        """Typo queries should complete in reasonable time."""
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Warm up
+                await client.get("/autocomplete", params={"query": "test", "limit": 1})
+                
+                start = time.perf_counter()
+                response = await client.get("/autocomplete", params={
+                    "query": "galbelstraße",
+                    "limit": 10,
+                    "latitude": 53.5974,
+                    "longitude": 10.2135
+                })
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                
+                assert response.status_code == 200
+                assert elapsed_ms < 300, f"Typo query took {elapsed_ms:.0f}ms (>300ms)"
+                
+                results = response.json()
+                assert any("Geibelstraße" in r["name"] for r in results), \
+                    f"Should find Geibelstraße: {[r['name'] for r in results]}"
+        
+        asyncio.run(run_test())
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

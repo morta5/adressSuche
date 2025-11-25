@@ -77,3 +77,4 @@ yarn-error.log*
 alembic/**/__pycache__/
 alembic/versions/*.pyc
 alembic/versions/*.pyo
+fuzzy_index/

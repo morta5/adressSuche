@@ -1,0 +1,92 @@
+# Copilot Setup Steps
+# This file contains setup instructions for GitHub Copilot when working on this repository.
+
+name: Copilot Setup
+
+# Database download
+database:
+  url: "https://cloud.farshidhakimy.de/s/ScfdTePfPc3oaR6/download"
+  file: "autocomplete.db"
+  description: "SQLite database with ~992,580 street entries for address autocomplete testing"
+
+# Setup commands
+setup:
+  - name: "Download database"
+    command: "curl -L -o autocomplete.db 'https://cloud.farshidhakimy.de/s/ScfdTePfPc3oaR6/download'"
+  
+  - name: "Install dependencies"
+    command: "pip install -r requirements.txt"
+  
+  - name: "Run tests"
+    command: "pytest test_fuzzy_search.py -v"
+  
+  - name: "Start API server"
+    command: "python main.py"
+    port: 8001
+
+# Test queries for API performance validation
+test_queries:
+  # Fast queries (should be < 20ms)
+  - url: "/autocomplete?query=kieler&limit=10&latitude=54.0863&longitude=9.9757"
+    expected_time_ms: 20
+    expected_result: "Kieler Straße"
+  
+  - url: "/autocomplete?query=großflecken&limit=10&latitude=53.5974&longitude=10.2135"
+    expected_time_ms: 20
+    expected_result: "Großflecken"
+  
+  # Multi-word queries (should be < 20ms)
+  - url: "/autocomplete?query=am+neuen+kamp&limit=10&latitude=54.0863&longitude=9.9757"
+    expected_time_ms: 20
+    expected_result: "Am Neuen Kamp"
+  
+  - url: "/autocomplete?query=albert-schweitzer-straße&limit=10&latitude=54.0863&longitude=9.9757"
+    expected_time_ms: 20
+    expected_result: "Albert-Schweitzer-Straße"
+  
+  - url: "/autocomplete?query=kieler+straße&limit=10&latitude=54.0863&longitude=9.9757"
+    expected_time_ms: 20
+    expected_result: "Kieler Straße"
+  
+  - url: "/autocomplete?query=kieler+straße&limit=10&latitude=53.5974&longitude=10.2135"
+    expected_time_ms: 20
+    expected_result: "Kieler Straße"
+  
+  # Typo tolerance queries (should be < 200ms)
+  - url: "/autocomplete?query=galbelstraße&limit=10&latitude=53.5974&longitude=10.2135"
+    expected_time_ms: 200
+    expected_result: "Gabelstraße"
+    description: "Typo: 'galbelstraße' finds 'Gabelstraße' (closest by Levenshtein distance)"
+  
+  - url: "/autocomplete?query=gretenweg&limit=10"
+    expected_time_ms: 200
+    expected_result: "Grethenweg"
+    expected_city: "Frankfurt am Main"
+    description: "Typo: 'gretenweg' should find 'Grethenweg Frankfurt' (missing 'h')"
+  
+  - url: "/autocomplete?query=hannes-mayer-straße+münchen&limit=10&latitude=54.0863&longitude=9.9757"
+    expected_time_ms: 500
+    expected_result: "Hannes-Meyer-Straße"
+    expected_city: "München"
+    description: "Typo in middle: 'mayer' should find 'meyer' in München"
+  
+  # City-in-query parsing (should be < 300ms)
+  - url: "/autocomplete?query=jungfernstieg+hamburg&limit=10&latitude=54.0863&longitude=9.9757"
+    expected_time_ms: 300
+    expected_result: "Jungfernstieg"
+    expected_city: "Hamburg"
+    description: "City parsing: 'jungfernstieg hamburg' should find 'Jungfernstieg' in Hamburg"
+
+# Performance requirements
+performance:
+  exact_prefix_query_max_ms: 20
+  fuzzy_typo_query_max_ms: 200
+  city_parsing_query_max_ms: 300
+  average_query_max_ms: 100
+
+# Notes for future development
+notes:
+  - "The API supports city extraction from queries (e.g., 'jungfernstieg hamburg')"
+  - "Fuzzy search uses BK-Tree with Levenshtein distance for typo tolerance"
+  - "FTS5 trigram index is used for fast prefix matching"
+  - "All queries should complete in under 500ms"

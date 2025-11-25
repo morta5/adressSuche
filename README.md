@@ -29,17 +29,17 @@ Download and place it in your project directory before starting the server.
 
 ### Local
 ```bash
-python -m v2.main
+python -m main
 ```
 
 ### Docker
 Build:
 ```bash
-docker build -t autocomplete-v2 ./v2
+docker build -t autocomplete-v2 .
 ```
 Run:
 ```bash
-docker run --rm -p 8001:8001 -v $(pwd)/v2:/data autocomplete-v2
+docker run --rm -p 8001:8001 -v $(pwd):/data autocomplete-v2
 ```
 ENV override (optional):
 ```bash
@@ -48,13 +48,19 @@ ENV override (optional):
 
 ### Try the API
 ```bash
-curl 'http://localhost:8001/autocomplete?query=bahnof%20str&limit=5'
-curl 'http://localhost:8001/autocomplete?query=schiler%20allee&limit=5'
+# Exact query
+curl 'http://localhost:8001/autocomplete?query=bahnhofstrasse&limit=5'
+
+# Query with typo (missing 'h')
+curl 'http://localhost:8001/autocomplete?query=banhofstrasse&limit=5'
+
+# Query with typo (missing 'l')
+curl 'http://localhost:8001/autocomplete?query=schilerstrasse&limit=5'
 ```
 
 ### Import Data
 ```bash
-python import_addresses_csv.py
+python import_addresses_csv.py <path_to_csv>
 python import_osm.py
 ```
 
@@ -77,4 +83,3 @@ python import_osm.py
 ## Credits
 - Esri Deutschland (CC BY 4.0)
 - OpenStreetMap contributors (ODbL)
-
