@@ -15,9 +15,8 @@ the typo is in the query or the indexed data.
 from __future__ import annotations
 
 import os
-from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from bktree import BKTree, MultiIndexBKTree
 from phonetic import (
@@ -378,7 +377,7 @@ class FuzzySearchIndex:
             else:
                 # Recompute score with additional phonetic matching
                 final_score = self._compute_final_score(
-                    query, query_search, street, match_info
+                    query, query_search, street_id, street, match_info
                 )
             
             result = {**street, 'match_score': final_score} if include_scores else {**street}
@@ -463,17 +462,22 @@ class FuzzySearchIndex:
         self,
         query: str,
         query_search: str,
+        street_id: int,
         street: Dict[str, Any],
         match_info: Dict[str, Any]
     ) -> float:
         """Compute final match score combining all signals.
         
         This is optimized to avoid redundant computations.
+        
+        Args:
+            query: Original query string
+            query_search: Normalized query string
+            street_id: Street identifier for cache lookup
+            street: Street data dictionary
+            match_info: Match information from candidate collection
         """
         base_score = match_info.get('score', 0.5)
-        
-        # Use cached normalized name if available
-        street_id = street.get('id')
         street_name = street.get('name', '')
         
         # For high base scores, use simplified scoring
