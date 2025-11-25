@@ -55,8 +55,14 @@ test_queries:
   # Typo tolerance queries (should be < 200ms)
   - url: "/autocomplete?query=galbelstraße&limit=10&latitude=53.5974&longitude=10.2135"
     expected_time_ms: 200
-    expected_result: "Geibelstraße"
-    description: "Typo: 'galbelstraße' should find 'Geibelstraße'"
+    expected_result: "Gabelstraße"
+    description: "Typo: 'galbelstraße' finds 'Gabelstraße' (closest by Levenshtein distance)"
+  
+  - url: "/autocomplete?query=gretenweg&limit=10"
+    expected_time_ms: 200
+    expected_result: "Grethenweg"
+    expected_city: "Frankfurt am Main"
+    description: "Typo: 'gretenweg' should find 'Grethenweg Frankfurt' (missing 'h')"
   
   - url: "/autocomplete?query=hannes-mayer-straße+münchen&limit=10&latitude=54.0863&longitude=9.9757"
     expected_time_ms: 500

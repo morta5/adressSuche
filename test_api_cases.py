@@ -104,9 +104,9 @@ TEST_CASES: List[APITestCase] = [
         query="galbelstraße",
         latitude=53.5974,
         longitude=10.2135,
-        expected_result="Geibelstraße",
+        expected_result="Geibelstraße",  # Geo-ranked near Hamburg
         max_time_ms=300,
-        description="Typo query: 'galbelstraße' should find 'Geibelstraße'"
+        description="Typo query: 'galbelstraße' finds 'Geibelstraße' near Hamburg"
     ),
     APITestCase(
         name="hannes_mayer_typo",
@@ -117,6 +117,16 @@ TEST_CASES: List[APITestCase] = [
         expected_city="München",
         max_time_ms=500,
         description="Typo in middle: 'hannes-mayer' should find 'hannes-meyer' in München"
+    ),
+    APITestCase(
+        name="gretenweg_typo",
+        query="gretenweg",
+        latitude=50.0976,
+        longitude=8.6892,
+        expected_result="Grethenweg",
+        expected_city="Frankfurt am Main",
+        max_time_ms=500,  # Allow more time for complex fuzzy search
+        description="Typo query: 'gretenweg' should find 'Grethenweg Frankfurt' (missing 'h')"
     ),
     
     # City-in-query parsing

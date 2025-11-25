@@ -173,12 +173,11 @@ def _extract_city_from_query(
 
 
 def _select_fuzzy_trigrams(all_trigrams: list[str]) -> list[str]:
-    """Select trigrams from START, MIDDLE, and END regions for fuzzy matching.
+    """Select trigrams for fuzzy matching, avoiding common suffix trigrams.
     
-    This handles typos at any position by ensuring we match on multiple regions:
-    - Start trigrams: help match prefix
-    - Middle trigrams: help match core name
-    - End trigrams: help match suffix (e.g., "strasse")
+    German street names often end in "straße/strasse" which produces very common
+    trigrams (str, tra, ras, ass, sse) that match most of the database. We focus
+    on trigrams from the unique part of the name (start and middle).
     
     Args:
         all_trigrams: List of all trigrams from the query
@@ -186,25 +185,44 @@ def _select_fuzzy_trigrams(all_trigrams: list[str]) -> list[str]:
     Returns:
         Selected trigrams for OR matching
     """
-    if len(all_trigrams) >= TRIGRAM_LONG_THRESHOLD:
-        # Long strings: pick 2 from start (idx 1-2), 2 from middle, 3 from end
-        start_tris = all_trigrams[1:3]  # Skip very first to avoid typos
-        mid_idx = len(all_trigrams) // 2
-        mid_tris = all_trigrams[mid_idx - 1 : mid_idx + 1]
-        end_tris = all_trigrams[-3:]
-        return start_tris + mid_tris + end_tris
-    elif len(all_trigrams) >= TRIGRAM_MEDIUM_THRESHOLD:
-        # Medium strings: pick 1 from start, 2 from middle, 2 from end
-        start_tris = all_trigrams[1:2]
-        mid_idx = len(all_trigrams) // 2
-        mid_tris = all_trigrams[mid_idx - 1 : mid_idx + 1]
-        end_tris = all_trigrams[-2:]
-        return start_tris + mid_tris + end_tris
-    elif len(all_trigrams) >= TRIGRAM_SHORT_THRESHOLD:
-        # Short strings: pick from start and end
-        return all_trigrams[1:2] + all_trigrams[-2:]
+    # Common suffix trigrams from "strasse", "weg", "platz", etc.
+    # These match too many entries and should be avoided
+    COMMON_SUFFIX_TRIGRAMS = {
+        '"str"', '"tra"', '"ras"', '"ass"', '"sse"',  # strasse
+        '"weg"', '"pla"', '"lat"', '"atz"',  # weg, platz
+        '"rin"', '"ing"',  # ring
+        '"lle"', '"lee"',  # allee
+    }
+    
+    # Filter out common suffix trigrams
+    filtered = [t for t in all_trigrams if t.lower() not in COMMON_SUFFIX_TRIGRAMS]
+    
+    # If too many were filtered out, use more from the original
+    if len(filtered) < 3 and len(all_trigrams) >= 3:
+        # Use first half which is less likely to be common suffixes
+        filtered = all_trigrams[: len(all_trigrams) // 2 + 2]
+    
+    if not filtered:
+        filtered = all_trigrams
+    
+    # Select trigrams focusing on start and middle (where unique name content is)
+    if len(filtered) >= TRIGRAM_LONG_THRESHOLD:
+        # Long strings: pick from start (idx 0-2) and middle
+        start_tris = filtered[0:3]
+        mid_idx = len(filtered) // 2
+        mid_tris = filtered[mid_idx - 1 : mid_idx + 2]
+        return list(dict.fromkeys(start_tris + mid_tris))  # Remove dupes
+    elif len(filtered) >= TRIGRAM_MEDIUM_THRESHOLD:
+        # Medium strings: pick from start and middle
+        start_tris = filtered[0:2]
+        mid_idx = len(filtered) // 2
+        mid_tris = filtered[mid_idx : mid_idx + 2]
+        return list(dict.fromkeys(start_tris + mid_tris))
+    elif len(filtered) >= TRIGRAM_SHORT_THRESHOLD:
+        # Short strings: pick first few
+        return filtered[0:3]
     else:
-        return all_trigrams
+        return filtered
 
 
 app = FastAPI(
@@ -641,7 +659,8 @@ async def autocomplete(
         if city:
             sql.append("AND s.city LIKE :city")
             params["city"] = f"{city}%"
-        sql.append("LIMIT :limit")
+        # ORDER BY bm25 to get best matches first (not rowid order)
+        sql.append("ORDER BY bm25(street_trigram) ASC LIMIT :limit")
 
         try:
             rows = (await db.execute(text("\n".join(sql)), params)).fetchall()
