@@ -29,6 +29,7 @@ from utils import (
 
 # Constants for search quality thresholds
 HIGH_QUALITY_SCORE_THRESHOLD = 0.7  # Score threshold for early exit optimization
+FUZZY_TRIGRAM_CANDIDATE_LIMIT = 3000  # Max candidates to fetch from trigram search
 
 # Import the new fuzzy search module
 try:
@@ -508,39 +509,54 @@ async def autocomplete(
 
     # Stage G: Fuzzy trigram search with OR matching for typo tolerance
     async def fuzzy_trigram_search() -> list[tuple[StreetAutocompleteResponse, float, int]]:
-        """Use trigram OR matching to find candidates with typos."""
+        """Use trigram AND matching to find candidates with typos."""
         qc_lower = qc.lower() if qc else ""
         if len(qc_lower) < 3:
             return []
         
-        # Generate trigrams from the query
-        trigrams = []
+        # Generate ALL trigrams from the query
+        all_trigrams = []
         for i in range(len(qc_lower) - 2):
             trigram = qc_lower[i:i+3]
             # Escape quotes for FTS5
             trigram = trigram.replace('"', '""')
-            trigrams.append(f'"{trigram}"')
+            all_trigrams.append(f'"{trigram}"')
         
-        if not trigrams:
+        if not all_trigrams:
             return []
         
-        # Use OR to match any trigram - this finds strings with similar trigrams
-        # Limit to 6 trigrams for performance
-        trigram_pattern = " OR ".join(trigrams[:6])
-        
         local: list[tuple[StreetAutocompleteResponse, float, int]] = []
-        params: Dict[str, Any] = {"pattern": trigram_pattern, "limit": max(limit * 15, 150)}
+        added = set()
+        
+        # Strategy: Use multiple AND trigrams from the middle/end of the string
+        # These are less affected by typos at the beginning
+        # For "galbelstrasse", use trigrams like "bel", "els", "lst", "str"
+        # which match "geibelstrasse"
+        
+        if len(all_trigrams) >= 6:
+            # Use 4 trigrams from the middle portion (indices 3-6 typically)
+            # This covers the suffix which is more stable
+            start_idx = max(1, len(all_trigrams) // 3)
+            and_trigrams = all_trigrams[start_idx:start_idx+4]
+        elif len(all_trigrams) >= 4:
+            and_trigrams = all_trigrams[1:5]  # Skip first trigram (most likely to have typo)
+        else:
+            and_trigrams = all_trigrams
+        
+        and_pattern = " AND ".join(and_trigrams)
+        
+        params: Dict[str, Any] = {"pattern": and_pattern, "limit": FUZZY_TRIGRAM_CANDIDATE_LIMIT}
         
         sql = [
             "SELECT s.id AS street_id, s.name, s.city, s.postal_code, s.latitude, s.longitude,",
-            "       s.normalized_name AS nn, bm25(street_trigram) AS rnk",
+            "       s.normalized_name AS nn",
             "FROM street_trigram JOIN streets s ON s.id = street_trigram.rowid",
             "WHERE street_trigram MATCH :pattern",
         ]
         if city:
             sql.append("AND s.city LIKE :city")
             params["city"] = f"{city}%"
-        sql.append("ORDER BY rnk LIMIT :limit")
+        sql.append("LIMIT :limit")
         
         try:
             rows = (await db.execute(text("\n".join(sql)), params)).fetchall()
@@ -548,6 +564,12 @@ async def autocomplete(
             return []
         
         for r in rows:
+            sid = r._mapping["street_id"]
+            # Check for duplicates BEFORE expensive Levenshtein calculation
+            if sid in added:
+                continue
+            added.add(sid)
+            
             nn = r._mapping.get("nn") or normalize_compact(r._mapping["name"])
             nn_lower = nn.lower() if nn else ""
             
