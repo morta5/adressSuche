@@ -996,7 +996,7 @@ async def reverse_geocode(
         house_number=str(nearest_row._mapping["house_number"]),
         latitude=float(nearest_row._mapping["addr_lat"]),
         longitude=float(nearest_row._mapping["addr_lon"]),
-        distance_km=round(nearest_distance, 4),
+        distance_km=round(nearest_distance, 2),
     )
 
 
