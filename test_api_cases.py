@@ -398,5 +398,146 @@ class TestPerformanceRegression:
         asyncio.run(run_test())
 
 
+class TestReverseGeocode:
+    """Tests for reverse geocoding endpoint."""
+    
+    @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
+    def test_reverse_geocode_basic(self):
+        """Test basic reverse geocoding functionality."""
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Test with Hamburg coordinates (should find nearby address if data exists)
+                response = await client.get("/reverse-geocode", params={
+                    "latitude": 53.5511,
+                    "longitude": 9.9937
+                })
+                
+                assert response.status_code == 200
+                result = response.json()
+                assert "exists" in result
+                
+                # If an address is found, verify response structure
+                if result["exists"]:
+                    assert "address_id" in result
+                    assert "street_name" in result
+                    assert "city" in result
+                    assert "house_number" in result
+                    assert "latitude" in result
+                    assert "longitude" in result
+                    assert "distance_km" in result
+        
+        asyncio.run(run_test())
+    
+    @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
+    def test_reverse_geocode_no_nearby_address(self):
+        """Test reverse geocode returns exists=False for remote locations."""
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Test with coordinates in the middle of the ocean
+                response = await client.get("/reverse-geocode", params={
+                    "latitude": 0.0,
+                    "longitude": 0.0
+                })
+                
+                assert response.status_code == 200
+                result = response.json()
+                assert result["exists"] is False
+        
+        asyncio.run(run_test())
+    
+    @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
+    def test_reverse_geocode_custom_max_distance(self):
+        """Test reverse geocode with custom max distance."""
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Test with very small max distance (should not find anything)
+                response = await client.get("/reverse-geocode", params={
+                    "latitude": 53.5511,
+                    "longitude": 9.9937,
+                    "max_distance_km": 0.0001  # 0.1 meters - very small
+                })
+                
+                assert response.status_code == 200
+                result = response.json()
+                # Should likely not find anything with such a small radius
+                # (unless there's an address at exactly this location)
+                assert "exists" in result
+        
+        asyncio.run(run_test())
+    
+    @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
+    def test_reverse_geocode_returns_same_structure_as_validate(self):
+        """Test that reverse geocode returns same structure as validate endpoint."""
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Get reverse geocode response
+                reverse_response = await client.get("/reverse-geocode", params={
+                    "latitude": 53.5511,
+                    "longitude": 9.9937,
+                    "max_distance_km": 1.0  # 1km radius for better chance of finding something
+                })
+                
+                assert reverse_response.status_code == 200
+                reverse_result = reverse_response.json()
+                
+                # Get validate response for comparison
+                validate_response = await client.get("/validate", params={
+                    "street_name": "Hauptstraße",
+                    "house_number": "1",
+                    "latitude": 53.5511,
+                    "longitude": 9.9937
+                })
+                
+                assert validate_response.status_code == 200
+                validate_result = validate_response.json()
+                
+                # Both responses should have the same keys
+                assert set(reverse_result.keys()) == set(validate_result.keys())
+        
+        asyncio.run(run_test())
+    
+    def test_reverse_geocode_requires_coordinates(self):
+        """Test that reverse geocode requires latitude and longitude."""
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Missing latitude
+                response = await client.get("/reverse-geocode", params={
+                    "longitude": 9.9937
+                })
+                assert response.status_code == 422  # Unprocessable Entity
+                
+                # Missing longitude
+                response = await client.get("/reverse-geocode", params={
+                    "latitude": 53.5511
+                })
+                assert response.status_code == 422
+                
+                # Missing both
+                response = await client.get("/reverse-geocode")
+                assert response.status_code == 422
+        
+        asyncio.run(run_test())
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

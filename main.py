@@ -896,6 +896,110 @@ async def validate_address(
     return AddressValidationResponse(exists=False)
 
 
+# Maximum distance in kilometers for reverse geocoding to return a result
+REVERSE_GEOCODE_MAX_DISTANCE_KM = 0.1  # 100 meters
+
+
+@app.get("/reverse-geocode", response_model=AddressValidationResponse)
+async def reverse_geocode(
+    latitude: float = Query(..., description="Latitude coordinate"),
+    longitude: float = Query(..., description="Longitude coordinate"),
+    max_distance_km: Optional[float] = Query(
+        None, description="Maximum distance in km (default 0.1 km = 100m)"
+    ),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Reverse geocode coordinates to find the nearest house number.
+
+    Returns the nearest address within the specified maximum distance.
+    If no address is found within the distance threshold, returns exists=False.
+
+    Args:
+        latitude: Latitude coordinate to search near
+        longitude: Longitude coordinate to search near
+        max_distance_km: Maximum distance in kilometers (default 0.1 km = 100m)
+
+    Returns:
+        AddressValidationResponse with the nearest address if found
+    """
+    max_dist = max_distance_km if max_distance_km is not None else REVERSE_GEOCODE_MAX_DISTANCE_KM
+
+    # Calculate bounding box for initial filtering (performance optimization)
+    # Use a slightly larger radius to account for edge cases
+    search_radius_km = max_dist * 1.5
+    lat_min, lat_max, lon_min, lon_max = await _geo_bounds(
+        latitude, longitude, search_radius_km
+    )
+
+    # Query addresses within the bounding box
+    # This uses the spatial index for fast pre-filtering
+    sql = """
+        SELECT 
+            a.id as address_id,
+            a.street_id,
+            a.house_number,
+            a.latitude as addr_lat,
+            a.longitude as addr_lon,
+            s.name as street_name,
+            s.city,
+            s.postal_code
+        FROM addresses a
+        JOIN streets s ON s.id = a.street_id
+        WHERE a.latitude BETWEEN :lat_min AND :lat_max
+          AND a.longitude BETWEEN :lon_min AND :lon_max
+        LIMIT 1000
+    """
+
+    params = {
+        "lat_min": lat_min,
+        "lat_max": lat_max,
+        "lon_min": lon_min,
+        "lon_max": lon_max,
+    }
+
+    try:
+        res = await db.execute(text(sql), params)
+        rows = res.fetchall()
+    except Exception:
+        return AddressValidationResponse(exists=False)
+
+    if not rows:
+        return AddressValidationResponse(exists=False)
+
+    # Calculate actual haversine distance for each candidate and find the nearest
+    nearest_row = None
+    nearest_distance = float("inf")
+
+    for row in rows:
+        addr_lat = row._mapping["addr_lat"]
+        addr_lon = row._mapping["addr_lon"]
+        distance = haversine_distance(latitude, longitude, addr_lat, addr_lon)
+
+        if distance < nearest_distance:
+            nearest_distance = distance
+            nearest_row = row
+
+    # Check if the nearest address is within the maximum distance threshold
+    if nearest_row is None or nearest_distance > max_dist:
+        return AddressValidationResponse(exists=False)
+
+    # Build and return the response
+    return AddressValidationResponse(
+        exists=True,
+        address_id=int(nearest_row._mapping["address_id"]),
+        street_name=str(nearest_row._mapping["street_name"]),
+        city=str(nearest_row._mapping["city"]),
+        postal_code=str(nearest_row._mapping["postal_code"])
+        if nearest_row._mapping["postal_code"] is not None
+        else None,
+        house_number=str(nearest_row._mapping["house_number"]),
+        latitude=float(nearest_row._mapping["addr_lat"]),
+        longitude=float(nearest_row._mapping["addr_lon"]),
+        distance_km=round(nearest_distance, 4),
+    )
+
+
 def _to_response(
     s: Street, lat: Optional[float], lon: Optional[float]
 ) -> StreetAutocompleteResponse:

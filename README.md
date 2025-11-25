@@ -7,6 +7,7 @@ This project provides an advanced address autocomplete API and frontend widget, 
 - Query understanding with German abbreviations and suffix expansion
 - Phonetic retrieval and reranking (German + Cologne phonetic)
 - Fast address autocomplete API
+- **Reverse geocoding**: Find nearest address from coordinates
 - Frontend JavaScript widget for address fields
 - Import and search using open datasets
 - Dockerized for easy deployment
@@ -56,6 +57,63 @@ curl 'http://localhost:8001/autocomplete?query=banhofstrasse&limit=5'
 
 # Query with typo (missing 'l')
 curl 'http://localhost:8001/autocomplete?query=schilerstrasse&limit=5'
+
+# Reverse geocoding - find nearest address from coordinates
+curl 'http://localhost:8001/reverse-geocode?latitude=53.5511&longitude=9.9937'
+
+# Reverse geocoding with custom max distance (1km)
+curl 'http://localhost:8001/reverse-geocode?latitude=53.5511&longitude=9.9937&max_distance_km=1.0'
+```
+
+## API Endpoints
+
+### GET /autocomplete
+Search for street names with autocomplete functionality.
+
+**Parameters:**
+- `query` (required): Search query string
+- `city` (optional): Filter by city name
+- `latitude`, `longitude` (optional): Coordinates for distance-based ranking
+- `limit` (optional): Maximum results (default: 10)
+
+### GET /validate
+Validate a specific address (street + house number).
+
+**Parameters:**
+- `street_name` (required): Street name to validate
+- `house_number` (required): House number to validate
+- `city` (optional): City name filter
+- `latitude`, `longitude` (optional): Coordinates for distance calculation
+
+### GET /reverse-geocode
+Find the nearest address from geographic coordinates.
+
+**Parameters:**
+- `latitude` (required): Latitude coordinate
+- `longitude` (required): Longitude coordinate
+- `max_distance_km` (optional): Maximum search radius in kilometers (default: 0.1 km = 100m)
+
+**Response:**
+Returns the same structure as `/validate`:
+```json
+{
+  "exists": true,
+  "address_id": 12345,
+  "street_name": "Hauptstraße",
+  "city": "Hamburg",
+  "postal_code": "20095",
+  "house_number": "42",
+  "latitude": 53.5511,
+  "longitude": 9.9937,
+  "distance_km": 0.0234
+}
+```
+
+If no address is found within the maximum distance, returns:
+```json
+{
+  "exists": false
+}
 ```
 
 ### Import Data
