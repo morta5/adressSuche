@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="de">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Reverse Geocoding - Beispiel</title>
+        <!-- Leaflet CSS -->
+        <link
+            rel="stylesheet"
+            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+            integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+            crossorigin=""
+        />
+        <!-- Leaflet JS -->
+        <script
+            src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""
+        ></script>
+        <style>
+            :root {
+                --bg: #f6f8fa;
+                --card: #fff;
+                --muted: #6b7280;
+                --accent: #0ea5e9;
+            }
+
+            html,
+            body {
+                height: 100%;
+                margin: 0;
+                font-family:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                    "Helvetica Neue", Arial, sans-serif;
+                background: var(--bg);
+                color: #111827;
+            }
+
+            .wrap {
+                max-width: 920px;
+                margin: 36px auto;
+                padding: 18px;
+            }
+
+            .card {
+                background: var(--card);
+                border-radius: 10px;
+                padding: 20px;
+                box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
+            }
+
+            h1 {
+                margin: 0 0 8px;
+                font-size: 20px;
+            }
+
+            p.lead {
+                margin: 0 0 16px;
+                color: var(--muted);
+                font-size: 14px;
+            }
+
+            .controls {
+                display: flex;
+                gap: 12px;
+                flex-wrap: wrap;
+                align-items: end;
+                margin-bottom: 10px;
+            }
+
+            .field {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+            }
+
+            label {
+                font-size: 13px;
+                color: #374151;
+                font-weight: 600;
+            }
+
+            input[type="number"],
+            input[type="text"] {
+                padding: 10px 12px;
+                border-radius: 8px;
+                border: 1px solid #e6edf3;
+                min-width: 160px;
+                font-size: 14px;
+                background: #fff;
+            }
+
+            input.small {
+                min-width: 120px;
+            }
+
+            .btn {
+                padding: 10px 14px;
+                border-radius: 8px;
+                border: none;
+                cursor: pointer;
+                color: white;
+                font-weight: 700;
+            }
+
+            .btn.primary {
+                background: var(--accent);
+            }
+            .btn.secondary {
+                background: #6b7280;
+            }
+
+            .status {
+                margin-top: 8px;
+                color: var(--muted);
+                font-size: 13px;
+            }
+
+            .result {
+                margin-top: 16px;
+                padding: 14px;
+                border-radius: 8px;
+                background: #fbfdff;
+                border: 1px solid #eef2f6;
+            }
+
+            .grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 12px;
+            }
+
+            .label {
+                font-size: 12px;
+                color: var(--muted);
+                font-weight: 700;
+            }
+
+            .value {
+                margin-top: 6px;
+                font-size: 15px;
+                color: #111827;
+                word-break: break-word;
+            }
+
+            pre.raw {
+                margin-top: 12px;
+                background: #f4f6f8;
+                padding: 10px;
+                border-radius: 6px;
+                overflow: auto;
+                font-size: 13px;
+            }
+
+            .map {
+                margin-top: 12px;
+                border-radius: 8px;
+                overflow: hidden;
+            }
+            #map {
+                height: 400px;
+                width: 100%;
+            }
+            footer.attribution {
+                margin-top: 18px;
+                color: var(--muted);
+                font-size: 13px;
+            }
+
+            @media (max-width: 640px) {
+                .controls {
+                    flex-direction: column;
+                    align-items: stretch;
+                }
+                .btn {
+                    width: 100%;
+                }
+                #map {
+                    height: 300px;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="wrap">
+            <div class="card" role="main" aria-labelledby="title">
+                <h1 id="title">📍 Reverse Geocoding - Beispiel</h1>
+                <p class="lead">
+                    Gebe Latitude und Longitude ein, nutze deine aktuelle
+                    Position oder klicke auf die Karte. Das Beispiel ruft die
+                    API <code>/reverse</code> auf und zeigt die rohe Antwort
+                    sowie geparste Felder an.
+                </p>
+
+                <div class="controls" role="region" aria-label="Steuerung">
+                    <div class="field">
+                        <label for="latitude">Latitude</label>
+                        <input
+                            id="latitude"
+                            type="number"
+                            step="any"
+                            placeholder="z. B. 53.5511"
+                            value="53.5511"
+                        />
+                    </div>
+
+                    <div class="field">
+                        <label for="longitude">Longitude</label>
+                        <input
+                            id="longitude"
+                            type="number"
+                            step="any"
+                            placeholder="z. B. 9.9937"
+                            value="9.9937"
+                        />
+                    </div>
+
+                    <div class="field">
+                        <label for="max_distance">Max. Distanz (km)</label>
+                        <input
+                            id="max_distance"
+                            class="small"
+                            type="number"
+                            step="0.01"
+                            value="0.1"
+                        />
+                    </div>
+
+                    <div style="display: flex; gap: 8px; align-items: flex-end">
+                        <button
+                            id="btn_query"
+                            class="btn primary"
+                            aria-label="Reverse Geocode ausführen"
+                        >
+                            Reverse geocode
+                        </button>
+                        <button
+                            id="btn_loc"
+                            class="btn secondary"
+                            aria-label="Meine Position verwenden"
+                        >
+                            Meine Position
+                        </button>
+                    </div>
+                </div>
+
+                <div id="status" class="status" aria-live="polite">Bereit.</div>
+
+                <div class="map">
+                    <div id="map"></div>
+                </div>
+
+                <div id="result" class="result" hidden>
+                    <div
+                        style="
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                        "
+                    >
+                        <div style="font-weight: 800">Ergebnis</div>
+                        <div
+                            id="result_tag"
+                            class="label"
+                            style="font-weight: 700"
+                        ></div>
+                    </div>
+
+                    <div class="grid" style="margin-top: 12px">
+                        <div>
+                            <div class="label">Straße</div>
+                            <div id="res_street" class="value">-</div>
+                        </div>
+
+                        <div>
+                            <div class="label">Hausnummer</div>
+                            <div id="res_housenumber" class="value">-</div>
+                        </div>
+
+                        <div>
+                            <div class="label">PLZ</div>
+                            <div id="res_postcode" class="value">-</div>
+                        </div>
+
+                        <div>
+                            <div class="label">Stadt</div>
+                            <div id="res_city" class="value">-</div>
+                        </div>
+
+                        <div>
+                            <div class="label">Koordinaten (lon, lat)</div>
+                            <div id="res_coords" class="value">-</div>
+                        </div>
+
+                        <div>
+                            <div class="label">Distanz (km)</div>
+                            <div id="res_distance" class="value">-</div>
+                        </div>
+                    </div>
+
+                    <pre id="raw" class="raw" aria-hidden="false">-</pre>
+                </div>
+
+                <footer class="attribution">
+                    API-Basis-URL:
+                    <code id="api_base">http://localhost:8001</code> — bei
+                    Bedarf anpassen. Daten:
+                    <a
+                        href="https://arcg.is/0nXTyK"
+                        target="_blank"
+                        rel="noopener"
+                        >Esri Deutschland (CC BY 4.0)</a
+                    >,
+                    <a
+                        href="https://www.openstreetmap.org/copyright"
+                        target="_blank"
+                        rel="noopener"
+                        >OpenStreetMap (ODbL)</a
+                    >.
+                </footer>
+            </div>
+        </div>
+
+        <script>
+            const API_BASE = document
+                .getElementById("api_base")
+                .textContent.trim();
+
+            const els = {
+                lat: document.getElementById("latitude"),
+                lon: document.getElementById("longitude"),
+                max: document.getElementById("max_distance"),
+                btnQuery: document.getElementById("btn_query"),
+                btnLoc: document.getElementById("btn_loc"),
+                status: document.getElementById("status"),
+                result: document.getElementById("result"),
+                tag: document.getElementById("result_tag"),
+                raw: document.getElementById("raw"),
+                res: {
+                    street: document.getElementById("res_street"),
+                    housenumber: document.getElementById("res_housenumber"),
+                    postcode: document.getElementById("res_postcode"),
+                    city: document.getElementById("res_city"),
+                    coords: document.getElementById("res_coords"),
+                    distance: document.getElementById("res_distance"),
+                },
+            };
+
+            let map, marker;
+
+            function initMap() {
+                map = L.map("map").setView([53.5511, 9.9937], 13);
+                L.tileLayer(
+                    "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                    {
+                        attribution:
+                            '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                    },
+                ).addTo(map);
+
+                map.on("click", function (e) {
+                    const lat = e.latlng.lat;
+                    const lng = e.latlng.lng;
+                    els.lat.value = lat.toFixed(6);
+                    els.lon.value = lng.toFixed(6);
+                    if (marker) map.removeLayer(marker);
+                    marker = L.marker([lat, lng]).addTo(map);
+                    callReverse(lat, lng, parseFloat(els.max.value));
+                });
+            }
+
+            function setStatus(text, isError = false) {
+                els.status.textContent = text;
+                els.status.style.color = isError ? "var(--danger)" : "";
+            }
+
+            function normalizeResponse(json) {
+                const r = {};
+                r.exists = Boolean(json.exists);
+                r.street = json.street || json.street_name || json.name || null;
+                r.housenumber =
+                    json.housenumber ||
+                    json.house_number ||
+                    json.houseNumber ||
+                    json.house ||
+                    null;
+                r.postcode =
+                    json.postcode ||
+                    json.postal_code ||
+                    json.postalCode ||
+                    null;
+                r.city = json.city || json.town || json.municipality || null;
+                r.latitude =
+                    typeof json.latitude === "number"
+                        ? json.latitude
+                        : typeof json.lat === "number"
+                          ? json.lat
+                          : null;
+                r.longitude =
+                    typeof json.longitude === "number"
+                        ? json.longitude
+                        : typeof json.lon === "number"
+                          ? json.lon
+                          : null;
+                r.distance_km =
+                    typeof json.distance_km === "number"
+                        ? json.distance_km
+                        : typeof json.distanceKm === "number"
+                          ? json.distanceKm
+                          : typeof json.distance === "number"
+                            ? json.distance
+                            : null;
+                return r;
+            }
+
+            function renderParsed(obj) {
+                els.res.street.textContent = obj.street || "-";
+                els.res.housenumber.textContent = obj.housenumber || "-";
+                els.res.postcode.textContent = obj.postcode || "-";
+                els.res.city.textContent = obj.city || "-";
+                if (
+                    typeof obj.longitude === "number" &&
+                    typeof obj.latitude === "number"
+                ) {
+                    els.res.coords.textContent = `${obj.longitude.toFixed(6)}, ${obj.latitude.toFixed(6)}`;
+                } else {
+                    els.res.coords.textContent = "-";
+                }
+                if (typeof obj.distance_km === "number") {
+                    els.res.distance.textContent = `${Number(obj.distance_km).toFixed(4)} km`;
+                } else {
+                    els.res.distance.textContent = "-";
+                }
+            }
+
+            function showRaw(json) {
+                els.raw.textContent = JSON.stringify(json, null, 2);
+            }
+
+            async function callReverse(lat, lon, maxDistanceKm) {
+                setStatus("Suche nach nächster Adresse…");
+                els.result.hidden = true;
+
+                const params = new URLSearchParams({
+                    latitude: String(lat),
+                    longitude: String(lon),
+                });
+                if (
+                    maxDistanceKm !== undefined &&
+                    maxDistanceKm !== null &&
+                    String(maxDistanceKm) !== ""
+                )
+                    params.set("max_distance_km", String(maxDistanceKm));
+
+                try {
+                    const res = await fetch(
+                        `${API_BASE}/reverse?${params.toString()}`,
+                        {
+                            method: "GET",
+                            headers: { Accept: "application/json" },
+                        },
+                    );
+
+                    if (!res.ok) {
+                        const txt = await res.text();
+                        console.error("Server response:", res.status, txt);
+                        setStatus(
+                            `Serverfehler: ${res.status} ${res.statusText}`,
+                            true,
+                        );
+                        return;
+                    }
+
+                    const json = await res.json();
+                    showRaw(json);
+
+                    const norm = normalizeResponse(json);
+                    els.tag.textContent = norm.exists
+                        ? "Gefunden"
+                        : "Nicht gefunden";
+                    renderParsed(norm);
+                    els.result.hidden = false;
+                    setStatus("Fertig.");
+                } catch (err) {
+                    console.error(err);
+                    setStatus("Netzwerkfehler beim Aufruf der API.", true);
+                }
+            }
+
+            els.btnQuery.addEventListener("click", () => {
+                const lat = parseFloat(els.lat.value);
+                const lon = parseFloat(els.lon.value);
+                const max =
+                    els.max.value === ""
+                        ? undefined
+                        : parseFloat(els.max.value);
+
+                if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+                    setStatus(
+                        "Bitte gültige Latitude und Longitude eingeben.",
+                        true,
+                    );
+                    return;
+                }
+
+                callReverse(lat, lon, max);
+                if (marker) map.removeLayer(marker);
+                marker = L.marker([lat, lon]).addTo(map);
+                map.panTo([lat, lon]);
+            });
+
+            els.btnLoc.addEventListener("click", () => {
+                if (!navigator.geolocation) {
+                    setStatus(
+                        "Geolocation wird von diesem Browser nicht unterstützt.",
+                        true,
+                    );
+                    return;
+                }
+
+                setStatus("Ermittle aktuelle Position…");
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => {
+                        const lat = pos.coords.latitude;
+                        const lon = pos.coords.longitude;
+                        els.lat.value = lat.toFixed(6);
+                        els.lon.value = lon.toFixed(6);
+                        setStatus("Position ermittelt — Suche Adresse…");
+                        callReverse(lat, lon, parseFloat(els.max.value));
+                        if (marker) map.removeLayer(marker);
+                        marker = L.marker([lat, lon]).addTo(map);
+                        map.panTo([lat, lon]);
+                    },
+                    (err) => {
+                        console.error(err);
+                        setStatus(
+                            "Konnte Position nicht ermitteln: " + err.message,
+                            true,
+                        );
+                    },
+                    { enableHighAccuracy: true, timeout: 10000 },
+                );
+            });
+
+            // Initialize map on load
+            window.addEventListener("load", initMap);
+        </script>
+    </body>
+</html>

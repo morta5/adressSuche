@@ -174,37 +174,46 @@ def _extract_city_from_query(
 
 def _select_fuzzy_trigrams(all_trigrams: list[str]) -> list[str]:
     """Select trigrams for fuzzy matching, avoiding common suffix trigrams.
-    
+
     German street names often end in "straße/strasse" which produces very common
     trigrams (str, tra, ras, ass, sse) that match most of the database. We focus
     on trigrams from the unique part of the name (start and middle).
-    
+
     Args:
         all_trigrams: List of all trigrams from the query
-        
+
     Returns:
         Selected trigrams for OR matching
     """
     # Common suffix trigrams from "strasse", "weg", "platz", etc.
     # These match too many entries and should be avoided
     COMMON_SUFFIX_TRIGRAMS = {
-        '"str"', '"tra"', '"ras"', '"ass"', '"sse"',  # strasse
-        '"weg"', '"pla"', '"lat"', '"atz"',  # weg, platz
-        '"rin"', '"ing"',  # ring
-        '"lle"', '"lee"',  # allee
+        '"str"',
+        '"tra"',
+        '"ras"',
+        '"ass"',
+        '"sse"',  # strasse
+        '"weg"',
+        '"pla"',
+        '"lat"',
+        '"atz"',  # weg, platz
+        '"rin"',
+        '"ing"',  # ring
+        '"lle"',
+        '"lee"',  # allee
     }
-    
+
     # Filter out common suffix trigrams
     filtered = [t for t in all_trigrams if t.lower() not in COMMON_SUFFIX_TRIGRAMS]
-    
+
     # If too many were filtered out, use more from the original
     if len(filtered) < 3 and len(all_trigrams) >= 3:
         # Use first half which is less likely to be common suffixes
         filtered = all_trigrams[: len(all_trigrams) // 2 + 2]
-    
+
     if not filtered:
         filtered = all_trigrams
-    
+
     # Select trigrams focusing on start and middle (where unique name content is)
     if len(filtered) >= TRIGRAM_LONG_THRESHOLD:
         # Long strings: pick from start (idx 0-2) and middle
@@ -238,9 +247,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-
 
 
 @app.on_event("startup")
@@ -608,14 +614,12 @@ async def autocomplete(
         local.sort(key=lambda t: (-t[1], t[0].name, t[0].city))
         return local[: max(limit * 5, 50)]
 
-
-
     # Stage G: Fuzzy trigram search with OR matching for typo tolerance
     async def fuzzy_trigram_search() -> list[
         tuple[StreetAutocompleteResponse, float, int]
     ]:
         """Use trigram OR matching to find candidates with typos.
-        
+
         Strategy: Use OR instead of AND with multiple trigrams from different
         parts of the string. This allows matching even when some trigrams are
         affected by typos. The Levenshtein distance filter then removes false positives.
@@ -900,7 +904,7 @@ async def validate_address(
 REVERSE_GEOCODE_MAX_DISTANCE_KM = 0.1  # 100 meters
 
 
-@app.get("/reverse-geocode", response_model=AddressValidationResponse)
+@app.get("/reverse", response_model=AddressValidationResponse)
 async def reverse_geocode(
     latitude: float = Query(..., description="Latitude coordinate"),
     longitude: float = Query(..., description="Longitude coordinate"),
@@ -923,7 +927,11 @@ async def reverse_geocode(
     Returns:
         AddressValidationResponse with the nearest address if found
     """
-    max_dist = max_distance_km if max_distance_km is not None else REVERSE_GEOCODE_MAX_DISTANCE_KM
+    max_dist = (
+        max_distance_km
+        if max_distance_km is not None
+        else REVERSE_GEOCODE_MAX_DISTANCE_KM
+    )
 
     # Calculate bounding box for initial filtering (performance optimization)
     # Use a slightly larger radius to account for edge cases
@@ -935,7 +943,7 @@ async def reverse_geocode(
     # Query addresses within the bounding box
     # This uses the spatial index for fast pre-filtering
     sql = """
-        SELECT 
+        SELECT
             a.id as address_id,
             a.street_id,
             a.house_number,

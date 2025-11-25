@@ -59,10 +59,10 @@ curl 'http://localhost:8001/autocomplete?query=banhofstrasse&limit=5'
 curl 'http://localhost:8001/autocomplete?query=schilerstrasse&limit=5'
 
 # Reverse geocoding - find nearest address from coordinates
-curl 'http://localhost:8001/reverse-geocode?latitude=53.5511&longitude=9.9937'
+curl 'http://localhost:8001/reverse?latitude=53.5511&longitude=9.9937'
 
 # Reverse geocoding with custom max distance (1km)
-curl 'http://localhost:8001/reverse-geocode?latitude=53.5511&longitude=9.9937&max_distance_km=1.0'
+curl 'http://localhost:8001/reverse?latitude=53.5511&longitude=9.9937&max_distance_km=1.0'
 ```
 
 ## API Endpoints
@@ -85,7 +85,7 @@ Validate a specific address (street + house number).
 - `city` (optional): City name filter
 - `latitude`, `longitude` (optional): Coordinates for distance calculation
 
-### GET /reverse-geocode
+### GET /reverse
 Find the nearest address from geographic coordinates.
 
 **Parameters:**
