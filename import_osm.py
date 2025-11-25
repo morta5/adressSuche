@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from database import SessionLocal, init_db
-from models import Address, Street
+from models import Address, Street, StreetSegment
 
 
 class BoundaryRelationCollector(SimpleHandler):
@@ -280,8 +280,11 @@ class StreetStreamingHandler(SimpleHandler):
         self.batch_size = batch_size
         self._factory = WKBFactory()
         self._pending: List[Dict[str, object]] = []
+        # Store segments with (name, city) key for later association
+        self._pending_segments: List[Tuple[str, str, List[Dict[str, object]]]] = []
         self.processed = 0
         self.persisted = 0
+        self.segments_persisted = 0
         self.skipped_missing_city = 0
         self._last_report = 0
 
@@ -326,16 +329,49 @@ class StreetStreamingHandler(SimpleHandler):
             'longitude': float(centroid.x),
         }
 
+        # Extract segments from the line geometry
+        segments = self._extract_segments(line)
+        if segments:
+            self._pending_segments.append((name, city, segments))
+
         self._pending.append(payload)
         self.processed += 1
 
         # Progress report every 10000 streets
         if self.processed - self._last_report >= 10000:
-            print(f"  Streets: {self.processed} processed, {self.persisted} with city, {self.skipped_missing_city} skipped (no city)")
+            print(f"  Streets: {self.processed} processed, {self.persisted} with city, {self.segments_persisted} segments, {self.skipped_missing_city} skipped (no city)")
             self._last_report = self.processed
 
         if len(self._pending) >= self.batch_size:
             self.flush()
+
+    def _extract_segments(self, line) -> List[Dict[str, object]]:
+        """Extract line segments from a LineString geometry."""
+        segments = []
+        coords = list(line.coords)
+        
+        for i in range(len(coords) - 1):
+            start_lon, start_lat = coords[i]
+            end_lon, end_lat = coords[i + 1]
+            
+            # Calculate bounding box for this segment
+            min_lat = min(start_lat, end_lat)
+            max_lat = max(start_lat, end_lat)
+            min_lon = min(start_lon, end_lon)
+            max_lon = max(start_lon, end_lon)
+            
+            segments.append({
+                'start_lat': float(start_lat),
+                'start_lon': float(start_lon),
+                'end_lat': float(end_lat),
+                'end_lon': float(end_lon),
+                'min_lat': float(min_lat),
+                'max_lat': float(max_lat),
+                'min_lon': float(min_lon),
+                'max_lon': float(max_lon),
+            })
+        
+        return segments
 
     def flush(self) -> None:
         if not self._pending:
@@ -360,6 +396,35 @@ class StreetStreamingHandler(SimpleHandler):
         self.session.flush()
         self.persisted += len(rows)
         self._pending.clear()
+
+        # Insert segments for the streets that were just inserted
+        self._flush_segments()
+
+    def _flush_segments(self) -> None:
+        """Insert pending segments using the street IDs from cache."""
+        if not self._pending_segments:
+            return
+
+        segment_values = []
+        for name, city, segments in self._pending_segments:
+            street_id = self.cache.get(name, city)
+            if street_id is None:
+                continue
+            
+            for seg in segments:
+                seg['street_id'] = street_id
+                segment_values.append(seg)
+
+        if segment_values:
+            # Use batched insert with ON CONFLICT DO NOTHING (segments can be duplicated across ways)
+            stmt = sqlite_insert(StreetSegment).values(segment_values)
+            stmt = stmt.on_conflict_do_nothing()
+            result = self.session.execute(stmt)
+            self.session.flush()
+            if result.rowcount and result.rowcount > 0:
+                self.segments_persisted += result.rowcount
+
+        self._pending_segments.clear()
 
     def _is_valid_street(self, tags) -> bool:
         highway = tags.get('highway')

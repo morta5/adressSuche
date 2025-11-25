@@ -242,6 +242,7 @@ def init_db():
     _ensure_phonetic_columns()
     _ensure_trigram_index()
     _ensure_spellfix_index()
+    _ensure_street_segments_indexes()
 
 
 def get_db():
@@ -712,6 +713,37 @@ def _ensure_trigram_index() -> None:
                     "WHERE normalized_name != ''"
                 )
             )
+
+
+def _ensure_street_segments_indexes() -> None:
+    """Ensure street_segments table has proper indexes for efficient spatial queries."""
+    with engine.begin() as conn:
+        # Check if street_segments table exists
+        result = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='street_segments'")
+        )
+        if not result.fetchone():
+            return  # Table doesn't exist yet
+
+        # Create indexes if they don't exist
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_segment_lat_range "
+                "ON street_segments (min_lat, max_lat)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_segment_lon_range "
+                "ON street_segments (min_lon, max_lon)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_segment_street_id "
+                "ON street_segments (street_id)"
+            )
+        )
 
 
 def _generate_multiword_patterns(words: List[str]) -> List[str]:

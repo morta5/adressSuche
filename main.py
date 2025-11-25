@@ -27,6 +27,7 @@ from utils import (
     normalize_compact,
     calculate_fuzzy_score_normalized,
     consonant_key,
+    point_to_segment_distance,
 )
 
 # Constants for search quality thresholds
@@ -914,10 +915,11 @@ async def reverse_geocode(
     db: AsyncSession = Depends(get_async_db),
 ):
     """
-    Reverse geocode coordinates to find the nearest house number.
+    Reverse geocode coordinates to find the nearest address or street.
 
-    Returns the nearest address within the specified maximum distance.
-    If no address is found within the distance threshold, returns exists=False.
+    First tries to find the nearest house number within the specified distance.
+    If no address is found, falls back to finding the nearest street segment.
+    Returns the coordinates of the closest point on the street.
 
     Args:
         latitude: Latitude coordinate to search near
@@ -925,7 +927,7 @@ async def reverse_geocode(
         max_distance_km: Maximum distance in kilometers (default 0.1 km = 100m)
 
     Returns:
-        AddressValidationResponse with the nearest address if found
+        AddressValidationResponse with the nearest address or street if found
     """
     max_dist = (
         max_distance_km
@@ -940,8 +942,34 @@ async def reverse_geocode(
         latitude, longitude, search_radius_km
     )
 
-    # Query addresses within the bounding box
-    # This uses the spatial index for fast pre-filtering
+    params = {
+        "lat_min": lat_min,
+        "lat_max": lat_max,
+        "lon_min": lon_min,
+        "lon_max": lon_max,
+    }
+
+    # First, try to find the nearest address (house number)
+    address_result = await _find_nearest_address(db, latitude, longitude, params, max_dist)
+    if address_result:
+        return address_result
+
+    # No address found, fall back to finding the nearest street segment
+    street_result = await _find_nearest_street_segment(db, latitude, longitude, params, max_dist)
+    if street_result:
+        return street_result
+
+    return AddressValidationResponse(exists=False)
+
+
+async def _find_nearest_address(
+    db: AsyncSession,
+    latitude: float,
+    longitude: float,
+    params: dict,
+    max_dist: float
+) -> Optional[AddressValidationResponse]:
+    """Find the nearest address within the bounding box."""
     sql = """
         SELECT
             a.id as address_id,
@@ -959,21 +987,14 @@ async def reverse_geocode(
         LIMIT 1000
     """
 
-    params = {
-        "lat_min": lat_min,
-        "lat_max": lat_max,
-        "lon_min": lon_min,
-        "lon_max": lon_max,
-    }
-
     try:
         res = await db.execute(text(sql), params)
         rows = res.fetchall()
     except Exception:
-        return AddressValidationResponse(exists=False)
+        return None
 
     if not rows:
-        return AddressValidationResponse(exists=False)
+        return None
 
     # Calculate actual haversine distance for each candidate and find the nearest
     nearest_row = None
@@ -990,7 +1011,7 @@ async def reverse_geocode(
 
     # Check if the nearest address is within the maximum distance threshold
     if nearest_row is None or nearest_distance > max_dist:
-        return AddressValidationResponse(exists=False)
+        return None
 
     # Build and return the response
     return AddressValidationResponse(
@@ -1004,6 +1025,85 @@ async def reverse_geocode(
         house_number=str(nearest_row._mapping["house_number"]),
         latitude=float(nearest_row._mapping["addr_lat"]),
         longitude=float(nearest_row._mapping["addr_lon"]),
+        distance_km=round(nearest_distance, 2),
+    )
+
+
+async def _find_nearest_street_segment(
+    db: AsyncSession,
+    latitude: float,
+    longitude: float,
+    params: dict,
+    max_dist: float
+) -> Optional[AddressValidationResponse]:
+    """Find the nearest street segment within the bounding box."""
+    # Query street segments that might be nearby
+    # We check segments whose bounding box overlaps with our search area
+    sql = """
+        SELECT
+            seg.id as segment_id,
+            seg.street_id,
+            seg.start_lat,
+            seg.start_lon,
+            seg.end_lat,
+            seg.end_lon,
+            s.name as street_name,
+            s.city,
+            s.postal_code
+        FROM street_segments seg
+        JOIN streets s ON s.id = seg.street_id
+        WHERE seg.max_lat >= :lat_min AND seg.min_lat <= :lat_max
+          AND seg.max_lon >= :lon_min AND seg.min_lon <= :lon_max
+        LIMIT 2000
+    """
+
+    try:
+        res = await db.execute(text(sql), params)
+        rows = res.fetchall()
+    except Exception:
+        return None
+
+    if not rows:
+        return None
+
+    # Calculate distance from point to each segment and find the nearest
+    nearest_row = None
+    nearest_distance = float("inf")
+    nearest_point_lat = 0.0
+    nearest_point_lon = 0.0
+
+    for row in rows:
+        start_lat = row._mapping["start_lat"]
+        start_lon = row._mapping["start_lon"]
+        end_lat = row._mapping["end_lat"]
+        end_lon = row._mapping["end_lon"]
+
+        distance, closest_lat, closest_lon = point_to_segment_distance(
+            latitude, longitude, start_lat, start_lon, end_lat, end_lon
+        )
+
+        if distance < nearest_distance:
+            nearest_distance = distance
+            nearest_row = row
+            nearest_point_lat = closest_lat
+            nearest_point_lon = closest_lon
+
+    # Check if the nearest segment is within the maximum distance threshold
+    if nearest_row is None or nearest_distance > max_dist:
+        return None
+
+    # Build and return the response (without house_number since this is just a street)
+    return AddressValidationResponse(
+        exists=True,
+        address_id=None,  # No address, just a street
+        street_name=str(nearest_row._mapping["street_name"]),
+        city=str(nearest_row._mapping["city"]),
+        postal_code=str(nearest_row._mapping["postal_code"])
+        if nearest_row._mapping["postal_code"] is not None
+        else None,
+        house_number=None,  # No house number for street-only match
+        latitude=round(nearest_point_lat, 6),  # Closest point on the street
+        longitude=round(nearest_point_lon, 6),
         distance_km=round(nearest_distance, 2),
     )
 

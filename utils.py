@@ -2,7 +2,7 @@
 
 import math
 import re
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -37,6 +37,68 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     r = 6371
 
     return c * r
+
+
+def point_to_segment_distance(
+    point_lat: float, point_lon: float,
+    seg_start_lat: float, seg_start_lon: float,
+    seg_end_lat: float, seg_end_lon: float
+) -> Tuple[float, float, float]:
+    """
+    Calculate the shortest distance from a point to a line segment.
+    
+    Returns the distance in km and the coordinates of the closest point on the segment.
+    Uses a flat-earth approximation which is accurate enough for short distances.
+    
+    Args:
+        point_lat, point_lon: The query point coordinates
+        seg_start_lat, seg_start_lon: Start of the segment
+        seg_end_lat, seg_end_lon: End of the segment
+    
+    Returns:
+        Tuple of (distance_km, closest_lat, closest_lon)
+    """
+    # For the projection calculation, we scale longitude by cos(lat) to account
+    # for the convergence of meridians at higher latitudes.
+    avg_lat = (point_lat + seg_start_lat + seg_end_lat) / 3
+    cos_lat = math.cos(math.radians(avg_lat))
+    
+    # Scale longitude coordinates by cos(lat) for more accurate flat-earth projection
+    px = point_lon * cos_lat
+    py = point_lat
+    ax = seg_start_lon * cos_lat
+    ay = seg_start_lat
+    bx = seg_end_lon * cos_lat
+    by = seg_end_lat
+    
+    # Vector from a to b
+    abx = bx - ax
+    aby = by - ay
+    
+    # Vector from a to p
+    apx = px - ax
+    apy = py - ay
+    
+    # Calculate the projection of ap onto ab
+    ab_squared = abx * abx + aby * aby
+    
+    if ab_squared < 1e-12:  # Segment is essentially a point
+        return haversine_distance(point_lat, point_lon, seg_start_lat, seg_start_lon), seg_start_lat, seg_start_lon
+    
+    # t is the parameter along the line segment [0, 1]
+    t = (apx * abx + apy * aby) / ab_squared
+    
+    # Clamp t to [0, 1] to stay on the segment
+    t = max(0.0, min(1.0, t))
+    
+    # Find the closest point on the segment
+    closest_lon = ax + t * abx
+    closest_lat = ay + t * aby
+    
+    # Calculate distance using haversine for accuracy
+    distance = haversine_distance(point_lat, point_lon, closest_lat, closest_lon)
+    
+    return distance, closest_lat, closest_lon
 
 
 def levenshtein_distance(s1: str, s2: str, max_distance: int = 3) -> int:

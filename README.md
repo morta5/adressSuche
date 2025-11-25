@@ -86,7 +86,12 @@ Validate a specific address (street + house number).
 - `latitude`, `longitude` (optional): Coordinates for distance calculation
 
 ### GET /reverse
-Find the nearest address from geographic coordinates.
+Find the nearest address or street from geographic coordinates.
+
+**Behavior:**
+1. First tries to find the nearest house number within the specified distance
+2. If no house number is found, falls back to finding the nearest street segment
+3. When matching a street (without house number), returns the closest point on the street
 
 **Parameters:**
 - `latitude` (required): Latitude coordinate
@@ -95,6 +100,8 @@ Find the nearest address from geographic coordinates.
 
 **Response:**
 Returns the same structure as `/validate`:
+
+When a house number is found:
 ```json
 {
   "exists": true,
@@ -105,11 +112,26 @@ Returns the same structure as `/validate`:
   "house_number": "42",
   "latitude": 53.5511,
   "longitude": 9.9937,
-  "distance_km": 0.0234
+  "distance_km": 0.02
 }
 ```
 
-If no address is found within the maximum distance, returns:
+When only a street is found (no house number nearby):
+```json
+{
+  "exists": true,
+  "address_id": null,
+  "street_name": "Hauptstraße",
+  "city": "Hamburg",
+  "postal_code": "20095",
+  "house_number": null,
+  "latitude": 53.5511,
+  "longitude": 9.9937,
+  "distance_km": 0.01
+}
+```
+
+If no address or street is found within the maximum distance, returns:
 ```json
 {
   "exists": false
