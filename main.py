@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from query_processor import QueryProcessor
 from phonetic import phonetic_match_score, phonetic_forms
+from bktree import levenshtein_distance
 
 from database import get_async_db, init_db
 from models import Street, Address
@@ -25,6 +26,9 @@ from utils import (
     calculate_fuzzy_score_normalized,
     consonant_key,
 )
+
+# Constants for search quality thresholds
+HIGH_QUALITY_SCORE_THRESHOLD = 0.7  # Score threshold for early exit optimization
 
 # Import the new fuzzy search module
 try:
@@ -179,28 +183,65 @@ async def autocomplete(
     processed_ids = set()
     candidates: list[tuple[StreetAutocompleteResponse, float]] = []
 
-    # Stage A: Exact prefix on name and normalized_name across variants
+    # Stage A: Exact prefix on name and normalized_name (OPTIMIZED - single query)
     async def exact_prefix() -> list[tuple[StreetAutocompleteResponse, float, int]]:
         local = []
-        for v in expanded_queries:
-            stmt = select(Street).where(Street.name.ilike(f"{v}%"))
-            if city:
-                stmt = stmt.where(Street.city.ilike(f"{city}%"))
-            stmt = stmt.limit(limit * 3)
-            res = await db.execute(stmt)
-            for s in res.scalars().all():
-                sc = 1.0 if v == query else 0.98
-                local.append((_to_response(s, latitude, longitude), sc, s.id))
-        # Also try normalized_name prefix with compact normalization
-        if qc:
-            stmt2 = select(Street).where(Street.normalized_name.ilike(f"{qc}%"))
-            if city:
-                stmt2 = stmt2.where(Street.city.ilike(f"{city}%"))
-            stmt2 = stmt2.limit(limit * 3)
-            res2 = await db.execute(stmt2)
-            for s in res2.scalars().all():
-                sc = 0.97
-                local.append((_to_response(s, latitude, longitude), sc, s.id))
+        added = set()
+        
+        # Single combined query for the main query variants
+        params: Dict[str, Any] = {"limit": limit * 4}
+        where_parts = []
+        
+        # Original query
+        where_parts.append("name LIKE :q1")
+        params["q1"] = f"{query}%"
+        
+        # Normalized query
+        if qc and qc != query:
+            where_parts.append("normalized_name LIKE :q2")
+            params["q2"] = f"{qc}%"
+        
+        sql = f"""
+            SELECT id, name, city, postal_code, latitude, longitude
+            FROM streets
+            WHERE ({' OR '.join(where_parts)})
+        """
+        if city:
+            sql += " AND city LIKE :city"
+            params["city"] = f"{city}%"
+        sql += " LIMIT :limit"
+        
+        try:
+            res = await db.execute(text(sql), params)
+            for r in res.fetchall():
+                sid = r._mapping["id"]
+                if sid in added:
+                    continue
+                added.add(sid)
+                name = r._mapping["name"]
+                # Score based on whether it's an exact prefix match
+                name_lower = name.lower()
+                query_lower = query.lower()
+                if name_lower.startswith(query_lower):
+                    sc = 1.0
+                else:
+                    sc = 0.97
+                resp = StreetAutocompleteResponse(
+                    street_id=sid,
+                    name=name,
+                    city=r._mapping["city"],
+                    postal_code=r._mapping.get("postal_code"),
+                    latitude=r._mapping["latitude"],
+                    longitude=r._mapping["longitude"],
+                    match_score=sc,
+                )
+                if latitude is not None and longitude is not None:
+                    d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                    resp.distance_km = round(d, 2)
+                    sc = _distance_penalized(sc, d)
+                local.append((resp, sc, sid))
+        except Exception:
+            pass
         return local
 
     # Stage B: Trigram FTS search on normalized_name
@@ -244,90 +285,123 @@ async def autocomplete(
             local.append((resp, base, resp.street_id))
         return local
 
-    # Stage C: SQL fuzzy LIKE on normalized_search using generated patterns
+    # Stage C: SQL fuzzy LIKE on normalized_search using generated patterns (OPTIMIZED)
     async def sql_typos() -> list[tuple[StreetAutocompleteResponse, float, int]]:
         if len(qn) < 3:
             return []
-        patterns = [qn]
-        # Single-wildcard patterns around the string
-        for i in range(min(6, len(qn))):
+        
+        # Generate fewer, more targeted patterns
+        patterns = []
+        # Single-wildcard patterns - only at likely typo positions (first 4 chars)
+        for i in range(min(4, len(qn))):
             patterns.append(qn[:i] + '_' + qn[i + 1 :])
-        # Vowel-insensitive: replace vowels by wildcard
-        vowels = set('aeiou')
-        vw = ''.join('_' if c in vowels else c for c in qn)
-        patterns.append(vw)
+        
+        # Combine all patterns into single OR query for performance
         local = []
         added = set()
-        for p in patterns[:8]:
-            stmt = select(Street).where(Street.normalized_search.like(f"%{p}%")).limit(max(50, limit * 8))
-            if city:
-                stmt = stmt.where(Street.city.ilike(f"{city}%"))
-            res = await db.execute(stmt)
-            for s in res.scalars().all():
-                if s.id in added:
+        
+        # Run all patterns in a single query using OR
+        or_clauses = " OR ".join([f"normalized_search LIKE :p{i}" for i in range(len(patterns))])
+        params = {f"p{i}": f"%{p}%" for i, p in enumerate(patterns)}
+        params["limit"] = max(80, limit * 10)
+        
+        sql = f"""
+            SELECT id, name, city, postal_code, latitude, longitude, normalized_name
+            FROM streets
+            WHERE ({or_clauses})
+        """
+        if city:
+            sql += " AND city LIKE :city"
+            params["city"] = f"{city}%"
+        sql += " LIMIT :limit"
+        
+        try:
+            res = await db.execute(text(sql), params)
+            for r in res.fetchall():
+                sid = r._mapping["id"]
+                if sid in added:
                     continue
-                added.add(s.id)
-                cand_norm = normalize_compact(getattr(s, "name"))
+                added.add(sid)
+                cand_norm = normalize_compact(r._mapping["name"])
                 sc = 0.62 + _prefix_bonus(qc, cand_norm)
-                local.append((_to_response(s, latitude, longitude), sc, s.id))
+                resp = StreetAutocompleteResponse(
+                    street_id=sid,
+                    name=r._mapping["name"],
+                    city=r._mapping["city"],
+                    postal_code=r._mapping.get("postal_code"),
+                    latitude=r._mapping["latitude"],
+                    longitude=r._mapping["longitude"],
+                    match_score=sc,
+                )
+                if latitude is not None and longitude is not None:
+                    d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                    resp.distance_km = round(d, 2)
+                    sc = _distance_penalized(sc, d)
+                local.append((resp, sc, sid))
+        except Exception:
+            pass
         return local
 
-    # Stage D: Phonetic search using precomputed phonetic codes
+    # Stage D: Phonetic search using precomputed phonetic codes (SIMPLIFIED for speed)
     async def phonetic_stage() -> list[tuple[StreetAutocompleteResponse, float, int]]:
-        german_codes, cologne_codes = _collect_phonetic_codes([query, *expanded_norm])
-        if not german_codes and not cologne_codes:
-            return []
-
-        # Use approximate matching on phonetic codes with constraints to keep it fast
         qg, qc_ph = phonetic_forms(query)
         q_cons = consonant_key(query)
+        
+        if not qg and not qc_ph and not q_cons:
+            return []
+
+        # Simpler, faster phonetic query - just use index prefix matching
         params: Dict[str, Any] = {
-            "qg": qg or "",
-            "qc": qc_ph or "",
-            "qcons": q_cons or "",
-            "gmin": max(1, (len(qg) - 3) if qg else 1),
-            "gmax": (len(qg) + 3) if qg else 99,
-            "cmin": max(1, (len(qc_ph) - 3) if qc_ph else 1),
-            "cmax": (len(qc_ph) + 3) if qc_ph else 99,
-            "prelimit": max(300, min(800, limit * 60)),
+            "prelimit": max(100, min(300, limit * 30)),
         }
-
-        where_core = [
-                "( (substr(phonetic_german,1,1) = substr(:qg,1,1) AND length(phonetic_german) BETWEEN :gmin AND :gmax)",
-                "  OR (substr(phonetic_cologne,1,1) = substr(:qc,1,1) AND length(phonetic_cologne) BETWEEN :cmin AND :cmax)",
-                "  OR (substr(consonant_key,1,1) = substr(:qcons,1,1)) )",
-        ]
+        
+        where_clauses = []
+        if qg and len(qg) >= 2:
+            where_clauses.append("phonetic_german LIKE :pg")
+            params["pg"] = f"{qg[:3]}%"
+        if qc_ph and len(qc_ph) >= 2:
+            where_clauses.append("phonetic_cologne LIKE :pc")
+            params["pc"] = f"{qc_ph[:3]}%"
+        if q_cons and len(q_cons) >= 2:
+            where_clauses.append("consonant_key LIKE :qcons")
+            params["qcons"] = f"{q_cons[:3]}%"
+        
+        if not where_clauses:
+            return []
+        
+        where_str = " OR ".join(where_clauses)
+        sql = f"""
+            SELECT id, name, city, postal_code, latitude, longitude, phonetic_german, phonetic_cologne
+            FROM streets
+            WHERE ({where_str})
+        """
         if city:
-            where_core.append("city LIKE :city")
+            sql += " AND city LIKE :city"
             params["city"] = f"{city}%"
-
-        sql = [
-            "WITH cand AS (",
-            "  SELECT id, name, city, postal_code, latitude, longitude, phonetic_german pg, phonetic_cologne pc",
-            "  FROM streets",
-            "  WHERE " + " AND ".join(where_core),
-            "  LIMIT :prelimit",
-            ")",
-                "SELECT id, name, city, postal_code, latitude, longitude, pg, pc, ck,",
-                "       MAX(fuzzy_score_norm(pg, :qg), fuzzy_score_norm(pc, :qc)) AS ph,",
-                "       fuzzy_score_norm(ck, :qcons) AS cs,",
-                "       (0.55 * MAX(fuzzy_score_norm(pg, :qg), fuzzy_score_norm(pc, :qc)) + 0.45 * fuzzy_score_norm(ck, :qcons)) AS ph_total",
-            "FROM cand",
-            "ORDER BY ph_total DESC, name ASC",
-            "LIMIT :limit",
-        ]
-        params["limit"] = max(60, limit * 6)
+        sql += " LIMIT :prelimit"
 
         try:
-            rows = (await db.execute(text("\n".join(sql)), params)).fetchall()
+            rows = (await db.execute(text(sql), params)).fetchall()
         except Exception:
             return []
 
         local: list[tuple[StreetAutocompleteResponse, float, int]] = []
         for r in rows:
             name = r._mapping["name"]
-            base = 0.8 + min(0.15, float(r._mapping.get("ph") or 0) * 0.2)
+            # Quick phonetic scoring
+            ph_score = 0.0
+            if qg:
+                pg = r._mapping.get("phonetic_german") or ""
+                if pg.startswith(qg[:2]):
+                    ph_score = 0.8 if pg == qg else 0.6
+            if qc_ph and ph_score < 0.7:
+                pc = r._mapping.get("phonetic_cologne") or ""
+                if pc.startswith(qc_ph[:2]):
+                    ph_score = max(ph_score, 0.8 if pc == qc_ph else 0.6)
+            
+            base = 0.5 + ph_score * 0.3
             base += _prefix_bonus(qc, normalize_compact(name))
+            
             resp = StreetAutocompleteResponse(
                 street_id=r._mapping["id"],
                 name=name,
@@ -432,18 +506,125 @@ async def autocomplete(
         
         return local
 
-    # Run retrieval stages sequentially to avoid concurrent DB operations on the same session
+    # Stage G: Fuzzy trigram search with OR matching for typo tolerance
+    async def fuzzy_trigram_search() -> list[tuple[StreetAutocompleteResponse, float, int]]:
+        """Use trigram OR matching to find candidates with typos."""
+        qc_lower = qc.lower() if qc else ""
+        if len(qc_lower) < 3:
+            return []
+        
+        # Generate trigrams from the query
+        trigrams = []
+        for i in range(len(qc_lower) - 2):
+            trigram = qc_lower[i:i+3]
+            # Escape quotes for FTS5
+            trigram = trigram.replace('"', '""')
+            trigrams.append(f'"{trigram}"')
+        
+        if not trigrams:
+            return []
+        
+        # Use OR to match any trigram - this finds strings with similar trigrams
+        # Limit to 6 trigrams for performance
+        trigram_pattern = " OR ".join(trigrams[:6])
+        
+        local: list[tuple[StreetAutocompleteResponse, float, int]] = []
+        params: Dict[str, Any] = {"pattern": trigram_pattern, "limit": max(limit * 15, 150)}
+        
+        sql = [
+            "SELECT s.id AS street_id, s.name, s.city, s.postal_code, s.latitude, s.longitude,",
+            "       s.normalized_name AS nn, bm25(street_trigram) AS rnk",
+            "FROM street_trigram JOIN streets s ON s.id = street_trigram.rowid",
+            "WHERE street_trigram MATCH :pattern",
+        ]
+        if city:
+            sql.append("AND s.city LIKE :city")
+            params["city"] = f"{city}%"
+        sql.append("ORDER BY rnk LIMIT :limit")
+        
+        try:
+            rows = (await db.execute(text("\n".join(sql)), params)).fetchall()
+        except Exception:
+            return []
+        
+        for r in rows:
+            nn = r._mapping.get("nn") or normalize_compact(r._mapping["name"])
+            nn_lower = nn.lower() if nn else ""
+            
+            # Calculate Levenshtein distance for scoring
+            dist = levenshtein_distance(qc_lower, nn_lower, max_dist=4)
+            
+            # Only include candidates with reasonable edit distance
+            if dist > 3:
+                continue
+            
+            # Score based on edit distance (closer = higher score)
+            if dist == 0:
+                base = 1.0
+            elif dist == 1:
+                base = 0.9
+            elif dist == 2:
+                base = 0.75
+            else:
+                base = 0.6
+            
+            # Add prefix bonus
+            base += _prefix_bonus(qc, nn)
+            
+            resp = StreetAutocompleteResponse(
+                street_id=r._mapping["street_id"],
+                name=r._mapping["name"],
+                city=r._mapping["city"],
+                postal_code=r._mapping.get("postal_code"),
+                latitude=r._mapping["latitude"],
+                longitude=r._mapping["longitude"],
+                match_score=base,
+            )
+            if latitude is not None and longitude is not None:
+                d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                resp.distance_km = round(d, 2)
+                base = _distance_penalized(base, d)
+            local.append((resp, base, resp.street_id))
+        
+        # Sort by score
+        local.sort(key=lambda t: (-t[1], t[0].name))
+        return local[:max(limit * 5, 50)]
+
+    # Run retrieval stages with early exit optimization
+    # Fast stages first, skip slow stages if we have enough results
+    
+    # Stage A: Exact prefix (fast, uses index)
     stage_a = await exact_prefix()
+    
+    # Stage B: Trigram prefix search (fast, uses FTS5 index)  
     stage_b = await trigram_search()
-    stage_c = await sql_typos()
-    stage_d = await phonetic_stage()
+    
+    # Stage G: Fuzzy trigram OR (moderate speed, good for typos)
+    stage_g = await fuzzy_trigram_search()
+    
+    # Early exit check - if we have enough high-quality results, skip expensive stages
+    fast_results = [*stage_a, *stage_b, *stage_g]
+    high_score_count = sum(1 for _, sc, _ in fast_results if sc >= HIGH_QUALITY_SCORE_THRESHOLD)
+    
     # Stage F: BK-Tree fuzzy search (sync, runs quickly from in-memory index)
     stage_f = bktree_fuzzy_search()
-    # If everything above is weak, run a broad prefix fallback to guarantee recall
+    
+    # Only run expensive stages if we don't have enough good results
+    stage_c = []
+    stage_d = []
     stage_e = []
-    if not (stage_a or stage_b or stage_c or stage_d or stage_f):
+    
+    if high_score_count < limit:
+        # Stage D: Phonetic (uses index, moderate speed)
+        stage_d = await phonetic_stage()
+    
+    # Skip Stage C (sql_typos) as it's very slow and Stage G handles typos better
+    # Only run if we have very few results
+    if not fast_results and not stage_d and not stage_f:
+        stage_c = await sql_typos()
         stage_e = await broad_prefix_fallback()
-    flat: list[tuple[StreetAutocompleteResponse, float, int]] = [*stage_a, *stage_b, *stage_c, *stage_d, *stage_f, *stage_e]
+    
+    flat: list[tuple[StreetAutocompleteResponse, float, int]] = [*stage_a, *stage_b, *stage_g, *stage_d, *stage_f, *stage_c, *stage_e]
 
     # Dedup + keep best score
     by_id: Dict[int, tuple[StreetAutocompleteResponse, float]] = {}

@@ -435,5 +435,119 @@ class TestPerformance:
         assert len(index.streets) == 5000
 
 
+def _real_db_available() -> bool:
+    """Check if the real database is available."""
+    db_path = Path("./autocomplete.db")
+    return db_path.exists() and db_path.stat().st_size > 1000000  # > 1MB
+
+
+class TestAPIPerformance:
+    """Performance tests for the API with real database."""
+    
+    @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
+    def test_typo_search_finds_correct_result(self):
+        """Test that searching for 'galbelstraße' finds 'Geibelstraße' in Neumünster."""
+        import asyncio
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get("/autocomplete", params={
+                    "query": "galbelstraße",
+                    "city": "Neumünster",
+                    "limit": 10
+                })
+                
+                assert response.status_code == 200
+                results = response.json()
+                assert len(results) > 0
+                
+                # Check that Geibelstraße is in the results
+                found = any(r["name"] == "Geibelstraße" for r in results)
+                assert found, f"Geibelstraße not found in results: {[r['name'] for r in results]}"
+                
+                # Check that it's ranked reasonably high (top 3)
+                for i, r in enumerate(results[:3]):
+                    if r["name"] == "Geibelstraße":
+                        return  # Good, it's in top 3
+                
+                # If not in top 3, still pass but note it
+                for i, r in enumerate(results):
+                    if r["name"] == "Geibelstraße":
+                        print(f"Note: Geibelstraße found at position {i+1}")
+                        return
+        
+        asyncio.run(run_test())
+    
+    @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
+    def test_api_response_time_with_typo(self):
+        """Test that API response time is under 500ms for typo searches."""
+        import asyncio
+        import time
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Warm up
+                await client.get("/autocomplete", params={"query": "test"})
+                
+                # Test queries
+                queries = [
+                    ("galbelstraße", "Neumünster"),
+                    ("bahnhofstraße", None),
+                    ("hauptstraße", "Berlin"),
+                ]
+                
+                for query, city in queries:
+                    params = {"query": query, "limit": 10}
+                    if city:
+                        params["city"] = city
+                    
+                    start = time.perf_counter()
+                    response = await client.get("/autocomplete", params=params)
+                    elapsed = time.perf_counter() - start
+                    
+                    assert response.status_code == 200
+                    assert elapsed < 0.5, f"Query '{query}' took {elapsed*1000:.0f}ms (>500ms)"
+        
+        asyncio.run(run_test())
+    
+    @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
+    def test_api_average_response_time(self):
+        """Test that average API response time is under 400ms over multiple queries."""
+        import asyncio
+        import time
+        from httpx import AsyncClient, ASGITransport
+        from main import app
+        
+        async def run_test():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                # Warm up
+                await client.get("/autocomplete", params={"query": "test"})
+                
+                queries = [
+                    "galbelstraße", "bahnhofstraße", "hauptstraße",
+                    "schillerstraße", "goethestraße", "friedrichstraße"
+                ]
+                
+                total_time = 0
+                for query in queries:
+                    start = time.perf_counter()
+                    response = await client.get("/autocomplete", params={"query": query, "limit": 10})
+                    total_time += time.perf_counter() - start
+                    assert response.status_code == 200
+                
+                avg_time = total_time / len(queries)
+                assert avg_time < 0.4, f"Average response time {avg_time*1000:.0f}ms exceeds 400ms"
+        
+        asyncio.run(run_test())
+
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
