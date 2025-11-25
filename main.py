@@ -1,4 +1,5 @@
 """Advanced Street Autocomplete API v2."""
+
 import asyncio
 import logging
 import math
@@ -39,17 +40,21 @@ UNICODE_FALLBACK_UPPER = "\uffff"  # Fallback upper bound for prefix range
 # Import the new fuzzy search module
 try:
     from fuzzy_search import FuzzySearchIndex, get_fuzzy_index
+
     FUZZY_SEARCH_AVAILABLE = True
 except ImportError:
     FUZZY_SEARCH_AVAILABLE = False
 
 # Thread-safe lazy loading of fuzzy index using threading.Lock
 import threading
+
 _fuzzy_index: Optional["FuzzySearchIndex"] = None
 _fuzzy_index_lock = threading.Lock()
 
 
-async def _geo_bounds(lat: float, lon: float, radius_km: float) -> Tuple[float, float, float, float]:
+async def _geo_bounds(
+    lat: float, lon: float, radius_km: float
+) -> Tuple[float, float, float, float]:
     lat_deg = radius_km / 110.574
     lon_deg = radius_km / (111.320 * max(0.0001, math.cos(math.radians(lat))))
     return lat - lat_deg, lat + lat_deg, lon - lon_deg, lon + lon_deg
@@ -76,9 +81,6 @@ def _prefix_bonus(qc: str, nc: str) -> float:
             break
         m += 1
     return min(m, 6) * 0.02
-
-
- 
 
 
 def _collect_phonetic_codes(candidates: List[str]) -> Tuple[List[str], List[str]]:
@@ -123,14 +125,14 @@ _known_cities_lock = threading.Lock()
 def _get_known_cities(db_path: str = "./autocomplete.db") -> set[str]:
     """Load known city names from the database (cached, case-insensitive)."""
     global _known_cities
-    
+
     if _known_cities is not None:
         return _known_cities
-    
+
     with _known_cities_lock:
         if _known_cities is not None:
             return _known_cities
-        
+
         try:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
@@ -144,32 +146,34 @@ def _get_known_cities(db_path: str = "./autocomplete.db") -> set[str]:
             return set()
 
 
-def _extract_city_from_query(query: str, known_cities: set[str]) -> Tuple[str, Optional[str]]:
+def _extract_city_from_query(
+    query: str, known_cities: set[str]
+) -> Tuple[str, Optional[str]]:
     """
     Extract city name from the end of query if present.
-    
+
     For query "jungfernstieg hamburg", returns ("jungfernstieg", "Hamburg").
     For query "hauptstraße berlin mitte", returns ("hauptstraße", "Berlin Mitte").
     For query "bahnhofstraße", returns ("bahnhofstraße", None).
-    
+
     Returns:
         Tuple of (street_query, detected_city)
     """
     parts = query.strip().split()
     if len(parts) < 2:
         return query, None
-    
+
     # Try to match last N words as a city (N from 1 to min(3, len(parts)-1))
     for n in range(min(3, len(parts) - 1), 0, -1):
         potential_city = " ".join(parts[-n:]).lower()
-        
+
         # Check if this is a known city
         if potential_city in known_cities:
             street_query = " ".join(parts[:-n])
             # Return city with original casing from query
             detected_city = " ".join(parts[-n:])
             return street_query, detected_city
-    
+
     return query, None
 
 
@@ -191,20 +195,20 @@ app.add_middleware(
 def _load_fuzzy_index() -> Optional["FuzzySearchIndex"]:
     """Load the fuzzy search index if available (thread-safe)."""
     global _fuzzy_index
-    
+
     # Fast path: already loaded
     if _fuzzy_index is not None:
         return _fuzzy_index
-    
+
     if not FUZZY_SEARCH_AVAILABLE:
         return None
-    
+
     # Thread-safe initialization
     with _fuzzy_index_lock:
         # Double-check after acquiring lock
         if _fuzzy_index is not None:
             return _fuzzy_index
-        
+
         try:
             loaded_index = get_fuzzy_index()
             if len(loaded_index.streets) > 0:
@@ -212,7 +216,7 @@ def _load_fuzzy_index() -> Optional["FuzzySearchIndex"]:
                 return _fuzzy_index
         except Exception:
             pass
-    
+
     return None
 
 
@@ -245,7 +249,7 @@ async def autocomplete(
         if detected_city:
             city = detected_city
             logger.debug(f"Extracted city '{city}' from query, street query: '{query}'")
-    
+
     qc = normalize_compact(query)
     qn = normalize_string(query)
 
@@ -260,7 +264,7 @@ async def autocomplete(
     async def exact_prefix() -> list[tuple[StreetAutocompleteResponse, float, int]]:
         local = []
         added = set()
-        
+
         # Helper to get the end of prefix range (increment last character)
         def prefix_end(prefix: str) -> str:
             if not prefix:
@@ -270,16 +274,16 @@ async def autocomplete(
             for i in range(len(chars) - 1, -1, -1):
                 if ord(chars[i]) < UNICODE_MAX_CODEPOINT:  # Can increment
                     chars[i] = chr(ord(chars[i]) + 1)
-                    return "".join(chars[:i+1])
+                    return "".join(chars[: i + 1])
             return prefix + UNICODE_FALLBACK_UPPER  # Fallback for maximum codepoint
-        
+
         # Use UNION of two indexed range queries instead of OR (which causes full scan)
         params: Dict[str, Any] = {
             "q1_start": query,
             "q1_end": prefix_end(query),
-            "limit": limit * 4
+            "limit": limit * 4,
         }
-        
+
         # Build the SQL with UNION to use index on both queries
         if qc and qc != query:
             # Both original name and normalized name
@@ -303,14 +307,14 @@ async def autocomplete(
                 FROM streets
                 WHERE name >= :q1_start AND name < :q1_end
             """
-        
+
         if city:
             # Wrap with city filter - explicitly list columns instead of SELECT *
             params["city"] = f"{city}%"
             sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({sql}) WHERE city LIKE :city"
-        
+
         sql += " LIMIT :limit"
-        
+
         try:
             res = await db.execute(text(sql), params)
             for r in res.fetchall():
@@ -336,7 +340,9 @@ async def autocomplete(
                     match_score=sc,
                 )
                 if latitude is not None and longitude is not None:
-                    d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                    d = haversine_distance(
+                        latitude, longitude, resp.latitude, resp.longitude
+                    )
                     resp.distance_km = round(d, 2)
                     sc = _distance_penalized(sc, d)
                 local.append((resp, sc, sid))
@@ -366,7 +372,9 @@ async def autocomplete(
             return []
         local = []
         for r in rows:
-            nn = r._mapping.get("nn") or normalize_compact(r._mapping["name"])  # fallback
+            nn = r._mapping.get("nn") or normalize_compact(
+                r._mapping["name"]
+            )  # fallback
             base = 1.0 / (1.0 + (float(r._mapping["rnk"]) / 6.0))
             base += _prefix_bonus(qc, nn)
             resp = StreetAutocompleteResponse(
@@ -379,7 +387,9 @@ async def autocomplete(
                 match_score=base,
             )
             if latitude is not None and longitude is not None:
-                d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                d = haversine_distance(
+                    latitude, longitude, resp.latitude, resp.longitude
+                )
                 resp.distance_km = round(d, 2)
                 base = _distance_penalized(base, d)
             local.append((resp, base, resp.street_id))
@@ -389,22 +399,24 @@ async def autocomplete(
     async def sql_typos() -> list[tuple[StreetAutocompleteResponse, float, int]]:
         if len(qn) < 3:
             return []
-        
+
         # Generate fewer, more targeted patterns
         patterns = []
         # Single-wildcard patterns - only at likely typo positions (first 4 chars)
         for i in range(min(4, len(qn))):
-            patterns.append(qn[:i] + '_' + qn[i + 1 :])
-        
+            patterns.append(qn[:i] + "_" + qn[i + 1 :])
+
         # Combine all patterns into single OR query for performance
         local = []
         added = set()
-        
+
         # Run all patterns in a single query using OR
-        or_clauses = " OR ".join([f"normalized_search LIKE :p{i}" for i in range(len(patterns))])
+        or_clauses = " OR ".join(
+            [f"normalized_search LIKE :p{i}" for i in range(len(patterns))]
+        )
         params = {f"p{i}": f"%{p}%" for i, p in enumerate(patterns)}
         params["limit"] = max(80, limit * 10)
-        
+
         sql = f"""
             SELECT id, name, city, postal_code, latitude, longitude, normalized_name
             FROM streets
@@ -414,7 +426,7 @@ async def autocomplete(
             sql += " AND city LIKE :city"
             params["city"] = f"{city}%"
         sql += " LIMIT :limit"
-        
+
         try:
             res = await db.execute(text(sql), params)
             for r in res.fetchall():
@@ -434,7 +446,9 @@ async def autocomplete(
                     match_score=sc,
                 )
                 if latitude is not None and longitude is not None:
-                    d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                    d = haversine_distance(
+                        latitude, longitude, resp.latitude, resp.longitude
+                    )
                     resp.distance_km = round(d, 2)
                     sc = _distance_penalized(sc, d)
                 local.append((resp, sc, sid))
@@ -446,7 +460,7 @@ async def autocomplete(
     async def phonetic_stage() -> list[tuple[StreetAutocompleteResponse, float, int]]:
         qg, qc_ph = phonetic_forms(query)
         q_cons = consonant_key(query)
-        
+
         if not qg and not qc_ph and not q_cons:
             return []
 
@@ -454,7 +468,7 @@ async def autocomplete(
         params: Dict[str, Any] = {
             "prelimit": max(100, min(300, limit * 30)),
         }
-        
+
         where_clauses = []
         if qg and len(qg) >= 2:
             where_clauses.append("phonetic_german LIKE :pg")
@@ -465,10 +479,10 @@ async def autocomplete(
         if q_cons and len(q_cons) >= 2:
             where_clauses.append("consonant_key LIKE :qcons")
             params["qcons"] = f"{q_cons[:3]}%"
-        
+
         if not where_clauses:
             return []
-        
+
         where_str = " OR ".join(where_clauses)
         sql = f"""
             SELECT id, name, city, postal_code, latitude, longitude, phonetic_german, phonetic_cologne
@@ -498,10 +512,10 @@ async def autocomplete(
                 pc = r._mapping.get("phonetic_cologne") or ""
                 if pc.startswith(qc_ph[:2]):
                     ph_score = max(ph_score, 0.8 if pc == qc_ph else 0.6)
-            
+
             base = 0.5 + ph_score * 0.3
             base += _prefix_bonus(qc, normalize_compact(name))
-            
+
             resp = StreetAutocompleteResponse(
                 street_id=r._mapping["id"],
                 name=name,
@@ -512,14 +526,18 @@ async def autocomplete(
                 match_score=base,
             )
             if latitude is not None and longitude is not None:
-                d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                d = haversine_distance(
+                    latitude, longitude, resp.latitude, resp.longitude
+                )
                 resp.distance_km = round(d, 2)
                 base = _distance_penalized(base, d)
             local.append((resp, base, resp.street_id))
         return local
 
     # Stage E: Broad prefix fallback + rerank (guarantee recall)
-    async def broad_prefix_fallback() -> list[tuple[StreetAutocompleteResponse, float, int]]:
+    async def broad_prefix_fallback() -> list[
+        tuple[StreetAutocompleteResponse, float, int]
+    ]:
         qn_norm = normalize_string(query)
         if not qn_norm:
             return []
@@ -537,7 +555,11 @@ async def autocomplete(
         seen = set()
         prelimit = max(400, min(1500, limit * 120))
         for p in list(prefixes)[:6]:
-            stmt = select(Street).where(Street.normalized_search.like(f"{p}%")).limit(prelimit)
+            stmt = (
+                select(Street)
+                .where(Street.normalized_search.like(f"{p}%"))
+                .limit(prelimit)
+            )
             if city:
                 stmt = stmt.where(Street.city.ilike(f"{city}%"))
             res = await db.execute(stmt)
@@ -548,10 +570,16 @@ async def autocomplete(
                 resp = _to_response(s, latitude, longitude)
                 # Compute strong combined score
                 ph = phonetic_match_score(query, resp.name)
-                _, fuzz = calculate_fuzzy_score_normalized(normalize_string(query), normalize_string(resp.name))
+                _, fuzz = calculate_fuzzy_score_normalized(
+                    normalize_string(query), normalize_string(resp.name)
+                )
                 base = 0.4 + _prefix_bonus(qc, normalize_compact(resp.name))
                 score = min(1.0, 0.4 * base + 0.4 * ph + 0.2 * fuzz)
-                if latitude is not None and longitude is not None and resp.distance_km is not None:
+                if (
+                    latitude is not None
+                    and longitude is not None
+                    and resp.distance_km is not None
+                ):
                     score = _distance_penalized(score, resp.distance_km)
                 resp.match_score = score
                 local.append((resp, score, resp.street_id))
@@ -565,7 +593,7 @@ async def autocomplete(
         fuzzy_idx = _load_fuzzy_index()
         if fuzzy_idx is None or len(fuzzy_idx.streets) == 0:
             return []
-        
+
         local: list[tuple[StreetAutocompleteResponse, float, int]] = []
         try:
             # Search with max_distance=2 for typo tolerance
@@ -574,78 +602,87 @@ async def autocomplete(
                 max_distance=2,
                 city=city,
                 limit=max(limit * 5, 50),
-                include_scores=True
+                include_scores=True,
             )
-            
+
             for street_data in results:
-                street_id = street_data.get('id')
+                street_id = street_data.get("id")
                 if street_id is None:
                     continue
-                
-                base_score = street_data.get('match_score', 0.7)
-                
+
+                base_score = street_data.get("match_score", 0.7)
+
                 resp = StreetAutocompleteResponse(
                     street_id=int(street_id),
-                    name=str(street_data.get('name', '')),
-                    city=str(street_data.get('city', '')),
-                    postal_code=street_data.get('postal_code'),
-                    latitude=float(street_data.get('latitude', 0)),
-                    longitude=float(street_data.get('longitude', 0)),
+                    name=str(street_data.get("name", "")),
+                    city=str(street_data.get("city", "")),
+                    postal_code=street_data.get("postal_code"),
+                    latitude=float(street_data.get("latitude", 0)),
+                    longitude=float(street_data.get("longitude", 0)),
                     match_score=base_score,
                 )
-                
+
                 if latitude is not None and longitude is not None:
-                    d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                    d = haversine_distance(
+                        latitude, longitude, resp.latitude, resp.longitude
+                    )
                     resp.distance_km = round(d, 2)
                     base_score = _distance_penalized(base_score, d)
-                
+
                 local.append((resp, base_score, street_id))
         except Exception as e:
             # Log the error for debugging but continue with other stages
             logger.debug(f"BK-Tree search failed: {e}")
-        
+
         return local
 
     # Stage G: Fuzzy trigram search with OR matching for typo tolerance
-    async def fuzzy_trigram_search() -> list[tuple[StreetAutocompleteResponse, float, int]]:
+    async def fuzzy_trigram_search() -> list[
+        tuple[StreetAutocompleteResponse, float, int]
+    ]:
         """Use trigram AND matching to find candidates with typos."""
         qc_lower = qc.lower() if qc else ""
         if len(qc_lower) < 3:
             return []
-        
+
         # Generate ALL trigrams from the query
         all_trigrams = []
         for i in range(len(qc_lower) - 2):
-            trigram = qc_lower[i:i+3]
+            trigram = qc_lower[i : i + 3]
             # Escape quotes for FTS5
             trigram = trigram.replace('"', '""')
             all_trigrams.append(f'"{trigram}"')
-        
+
         if not all_trigrams:
             return []
-        
+
         local: list[tuple[StreetAutocompleteResponse, float, int]] = []
         added = set()
-        
+
         # Strategy: Use multiple AND trigrams from the middle/end of the string
         # These are less affected by typos at the beginning
         # For "galbelstrasse", use trigrams like "bel", "els", "lst", "str"
         # which match "geibelstrasse"
-        
+
         if len(all_trigrams) >= 6:
             # Use 4 trigrams from the middle portion (indices 3-6 typically)
             # This covers the suffix which is more stable
             start_idx = max(1, len(all_trigrams) // 3)
-            and_trigrams = all_trigrams[start_idx:start_idx+4]
+            and_trigrams = all_trigrams[start_idx : start_idx + 4]
         elif len(all_trigrams) >= 4:
-            and_trigrams = all_trigrams[1:5]  # Skip first trigram (most likely to have typo)
+            and_trigrams = all_trigrams[
+                1:5
+            ]  # Skip first trigram (most likely to have typo)
         else:
             and_trigrams = all_trigrams
-        
+
         and_pattern = " AND ".join(and_trigrams)
-        
-        params: Dict[str, Any] = {"pattern": and_pattern, "limit": FUZZY_TRIGRAM_CANDIDATE_LIMIT}
-        
+
+        params: Dict[str, Any] = {
+            "pattern": and_pattern,
+            "limit": FUZZY_TRIGRAM_CANDIDATE_LIMIT,
+        }
+
         sql = [
             "SELECT s.id AS street_id, s.name, s.city, s.postal_code, s.latitude, s.longitude,",
             "       s.normalized_name AS nn",
@@ -656,29 +693,29 @@ async def autocomplete(
             sql.append("AND s.city LIKE :city")
             params["city"] = f"{city}%"
         sql.append("LIMIT :limit")
-        
+
         try:
             rows = (await db.execute(text("\n".join(sql)), params)).fetchall()
         except Exception:
             return []
-        
+
         for r in rows:
             sid = r._mapping["street_id"]
             # Check for duplicates BEFORE expensive Levenshtein calculation
             if sid in added:
                 continue
             added.add(sid)
-            
+
             nn = r._mapping.get("nn") or normalize_compact(r._mapping["name"])
             nn_lower = nn.lower() if nn else ""
-            
+
             # Calculate Levenshtein distance for scoring
             dist = levenshtein_distance(qc_lower, nn_lower, max_dist=4)
-            
+
             # Only include candidates with reasonable edit distance
             if dist > 3:
                 continue
-            
+
             # Score based on edit distance (closer = higher score)
             if dist == 0:
                 base = 1.0
@@ -688,10 +725,10 @@ async def autocomplete(
                 base = 0.75
             else:
                 base = 0.6
-            
+
             # Add prefix bonus
             base += _prefix_bonus(qc, nn)
-            
+
             resp = StreetAutocompleteResponse(
                 street_id=r._mapping["street_id"],
                 name=r._mapping["name"],
@@ -702,69 +739,85 @@ async def autocomplete(
                 match_score=base,
             )
             if latitude is not None and longitude is not None:
-                d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                d = haversine_distance(
+                    latitude, longitude, resp.latitude, resp.longitude
+                )
                 resp.distance_km = round(d, 2)
                 base = _distance_penalized(base, d)
             local.append((resp, base, resp.street_id))
-        
+
         # Sort by score
         local.sort(key=lambda t: (-t[1], t[0].name))
-        return local[:max(limit * 5, 50)]
+        return local[: max(limit * 5, 50)]
 
     # Run retrieval stages with early exit optimization
     # Fast stages first, skip slow stages if we have enough results
-    
+
     # Stage A: Exact prefix (fast, uses index)
     stage_a = await exact_prefix()
-    
+
     # Check if Stage A found any exact prefix matches (score ~= 1.0 or 0.97)
     # If so, skip expensive fuzzy stages as we likely have good results
     stage_a_has_matches = len(stage_a) > 0
-    stage_a_has_good_match = any(sc >= HIGH_QUALITY_SCORE_THRESHOLD for _, sc, _ in stage_a)
-    
+    stage_a_has_good_match = any(
+        sc >= HIGH_QUALITY_SCORE_THRESHOLD for _, sc, _ in stage_a
+    )
+
     # Stage B: Trigram prefix search (fast, uses FTS5 index)
     # Only run if Stage A didn't find enough results
     stage_b = []
     if len(stage_a) < limit:
         stage_b = await trigram_search()
-    
+
     # Early exit check after fast stages
     fast_results = [*stage_a, *stage_b]
-    has_good_fast_results = len(fast_results) >= limit or (stage_a_has_matches and stage_a_has_good_match)
-    
+    has_good_fast_results = len(fast_results) >= limit or (
+        stage_a_has_matches and stage_a_has_good_match
+    )
+
     # Stage G: Fuzzy trigram OR (moderate speed, good for typos)
     # ONLY run if we don't have good results from exact matching
     # This is expensive for queries with common suffixes like "straße"
     stage_g = []
     if not has_good_fast_results:
         stage_g = await fuzzy_trigram_search()
-    
+
     # Combined results
     all_fast_results = [*fast_results, *stage_g]
-    high_score_count = sum(1 for _, sc, _ in all_fast_results if sc >= HIGH_QUALITY_SCORE_THRESHOLD)
-    
+    high_score_count = sum(
+        1 for _, sc, _ in all_fast_results if sc >= HIGH_QUALITY_SCORE_THRESHOLD
+    )
+
     # Stage F: BK-Tree fuzzy search (sync, runs quickly from in-memory index)
     # Only run if we still don't have enough results
     stage_f = []
     if not has_good_fast_results and high_score_count < limit:
         stage_f = bktree_fuzzy_search()
-    
+
     # Only run expensive stages if we don't have enough good results
     stage_c = []
     stage_d = []
     stage_e = []
-    
+
     if high_score_count < limit and not has_good_fast_results:
         # Stage D: Phonetic (uses index, moderate speed)
         stage_d = await phonetic_stage()
-    
+
     # Skip Stage C (sql_typos) as it's very slow and Stage G handles typos better
     # Only run if we have very few results
     if not all_fast_results and not stage_d and not stage_f:
         stage_c = await sql_typos()
         stage_e = await broad_prefix_fallback()
-    
-    flat: list[tuple[StreetAutocompleteResponse, float, int]] = [*stage_a, *stage_b, *stage_g, *stage_d, *stage_f, *stage_c, *stage_e]
+
+    flat: list[tuple[StreetAutocompleteResponse, float, int]] = [
+        *stage_a,
+        *stage_b,
+        *stage_g,
+        *stage_d,
+        *stage_f,
+        *stage_c,
+        *stage_e,
+    ]
 
     # Dedup + keep best score
     by_id: Dict[int, tuple[StreetAutocompleteResponse, float]] = {}
@@ -776,14 +829,20 @@ async def autocomplete(
             by_id[sid] = (resp, sc)
 
     # Optional phonetic + normalized fuzzy reranking on top K candidates
-    top_candidates = sorted(by_id.values(), key=lambda t: t[1], reverse=True)[: max(limit * 8, 100)]
+    top_candidates = sorted(by_id.values(), key=lambda t: t[1], reverse=True)[
+        : max(limit * 8, 100)
+    ]
     reranked: list[tuple[StreetAutocompleteResponse, float]] = []
     qn_norm = normalize_string(query)
     for resp, base in top_candidates:
         ph = phonetic_match_score(query, resp.name)
         _, fuzz = calculate_fuzzy_score_normalized(qn_norm, normalize_string(resp.name))
         combined = min(1.0, 0.55 * base + 0.30 * ph + 0.15 * fuzz)
-        if latitude is not None and longitude is not None and resp.distance_km is not None:
+        if (
+            latitude is not None
+            and longitude is not None
+            and resp.distance_km is not None
+        ):
             combined = _distance_penalized(combined, resp.distance_km)
         resp.match_score = combined
         reranked.append((resp, combined))
@@ -797,8 +856,12 @@ async def validate_address(
     street_name: str = Query(..., description="Street name"),
     house_number: str = Query(..., description="House number"),
     city: Optional[str] = Query(None, description="City name"),
-    latitude: Optional[float] = Query(None, description="Latitude for distance calculation"),
-    longitude: Optional[float] = Query(None, description="Longitude for distance calculation"),
+    latitude: Optional[float] = Query(
+        None, description="Latitude for distance calculation"
+    ),
+    longitude: Optional[float] = Query(
+        None, description="Longitude for distance calculation"
+    ),
     db: AsyncSession = Depends(get_async_db),
 ):
     target_norm = normalize_string(street_name)
@@ -818,9 +881,13 @@ async def validate_address(
             Street.normalized_name.ilike(f"{normalize_compact(street_name)}%"),
         ]
         if qg:
-            conditions.append(Street.phonetic_german.like(f"{qg[: max(1, len(qg)-1)]}%"))
+            conditions.append(
+                Street.phonetic_german.like(f"{qg[: max(1, len(qg) - 1)]}%")
+            )
         if qc_ph:
-            conditions.append(Street.phonetic_cologne.like(f"{qc_ph[: max(1, len(qc_ph)-1)]}%"))
+            conditions.append(
+                Street.phonetic_cologne.like(f"{qc_ph[: max(1, len(qc_ph) - 1)]}%")
+            )
         stmt2 = select(Street).where(or_(*conditions)).limit(60)
         if city:
             stmt2 = stmt2.where(Street.city.ilike(f"{city}%"))
@@ -829,7 +896,11 @@ async def validate_address(
 
     # Check addresses on found streets
     for st in streets:
-        a_stmt = select(Address).where(Address.street_id == st.id, Address.house_number == house_number).limit(1)
+        a_stmt = (
+            select(Address)
+            .where(Address.street_id == st.id, Address.house_number == house_number)
+            .limit(1)
+        )
         ares = await db.execute(a_stmt)
         addr = ares.scalars().first()
         if addr:
@@ -838,19 +909,31 @@ async def validate_address(
                 address_id=int(getattr(addr, "id")),
                 street_name=str(getattr(st, "name")),
                 city=str(getattr(st, "city")),
-                postal_code=str(getattr(st, "postal_code")) if getattr(st, "postal_code") is not None else None,
+                postal_code=str(getattr(st, "postal_code"))
+                if getattr(st, "postal_code") is not None
+                else None,
                 house_number=str(getattr(addr, "house_number")),
                 latitude=float(getattr(addr, "latitude")),
                 longitude=float(getattr(addr, "longitude")),
             )
             if latitude is not None and longitude is not None:
-                resp.distance_km = round(haversine_distance(float(latitude), float(longitude), float(getattr(addr, "latitude")), float(getattr(addr, "longitude"))), 2)
+                resp.distance_km = round(
+                    haversine_distance(
+                        float(latitude),
+                        float(longitude),
+                        float(getattr(addr, "latitude")),
+                        float(getattr(addr, "longitude")),
+                    ),
+                    2,
+                )
             return resp
 
     return AddressValidationResponse(exists=False)
 
 
-def _to_response(s: Street, lat: Optional[float], lon: Optional[float]) -> StreetAutocompleteResponse:
+def _to_response(
+    s: Street, lat: Optional[float], lon: Optional[float]
+) -> StreetAutocompleteResponse:
     sid = getattr(s, "id")
     name = getattr(s, "name")
     city = getattr(s, "city")
@@ -875,4 +958,5 @@ def _to_response(s: Street, lat: Optional[float], lon: Optional[float]) -> Stree
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, workers=4)
+
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, workers=1)
