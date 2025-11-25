@@ -341,5 +341,99 @@ class TestGermanStreetNameCases:
         assert results[0]["name"] == "Bahnhofstraße"
 
 
+class TestPerformance:
+    """Performance tests for the fuzzy search system.
+    
+    These tests verify that search operations complete within
+    acceptable time bounds even with larger datasets.
+    """
+    
+    @pytest.fixture
+    def large_index(self):
+        """Create an index with 10,000 street entries for performance testing."""
+        index = FuzzySearchIndex()
+        prefixes = ["Haupt", "Bahn", "Schiller", "Goethe", "Mozart", "Beethoven",
+                    "Bach", "Kant", "Hegel", "Marx", "Kirchen", "Markt"]
+        suffixes = ["straße", "weg", "platz", "allee", "ring", "gasse", "damm"]
+        cities = ["Berlin", "Hamburg", "München", "Frankfurt", "Köln"]
+        
+        for i in range(10000):
+            prefix = prefixes[i % len(prefixes)]
+            suffix = suffixes[i % len(suffixes)]
+            city = cities[i % len(cities)]
+            name = f"{prefix}{suffix}{i % 100}"
+            index.add_street(i, name, city, f"{10000 + i}", 52.5, 13.4)
+        
+        return index
+    
+    def test_fuzzy_search_performance(self, large_index):
+        """Fuzzy search should complete within 50ms for 10,000 entries."""
+        import time
+        
+        queries = ["Banhofstraße", "Schilerplatz", "Goetheallee"]
+        
+        for query in queries:
+            start = time.perf_counter()
+            results = large_index.search(query, max_distance=2, limit=10)
+            elapsed = time.perf_counter() - start
+            
+            # Should complete within 50ms
+            assert elapsed < 0.050, f"Search for '{query}' took {elapsed*1000:.2f}ms (>50ms)"
+    
+    def test_prefix_search_performance(self, large_index):
+        """Prefix search should complete within 5ms for 10,000 entries."""
+        import time
+        
+        queries = ["Bahn", "Schiller", "Haupt"]
+        
+        for query in queries:
+            start = time.perf_counter()
+            results = large_index.search_prefix(query, limit=10)
+            elapsed = time.perf_counter() - start
+            
+            # Should complete within 5ms
+            assert elapsed < 0.005, f"Prefix search for '{query}' took {elapsed*1000:.2f}ms (>5ms)"
+    
+    def test_search_with_city_filter_performance(self, large_index):
+        """Search with city filter should complete within 50ms."""
+        import time
+        
+        start = time.perf_counter()
+        results = large_index.search("Bahnhof", max_distance=2, city="Berlin", limit=10)
+        elapsed = time.perf_counter() - start
+        
+        assert elapsed < 0.050, f"Search with city filter took {elapsed*1000:.2f}ms (>50ms)"
+    
+    def test_average_search_latency(self, large_index):
+        """Average search latency should be under 30ms over 100 iterations."""
+        import time
+        
+        total_time = 0
+        iterations = 100
+        
+        for i in range(iterations):
+            query = ["Banhofstraße", "Schilerplatz", "Goetheallee"][i % 3]
+            start = time.perf_counter()
+            results = large_index.search(query, max_distance=2, limit=10)
+            total_time += time.perf_counter() - start
+        
+        avg_time = total_time / iterations
+        assert avg_time < 0.030, f"Average search time was {avg_time*1000:.2f}ms (>30ms)"
+    
+    def test_index_build_performance(self):
+        """Building an index with 5,000 entries should complete within 10 seconds."""
+        import time
+        
+        index = FuzzySearchIndex()
+        
+        start = time.perf_counter()
+        for i in range(5000):
+            index.add_street(i, f"Straße{i}", "Berlin", "10115", 52.5, 13.4)
+        elapsed = time.perf_counter() - start
+        
+        assert elapsed < 10.0, f"Building index took {elapsed:.2f}s (>10s)"
+        assert len(index.streets) == 5000
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

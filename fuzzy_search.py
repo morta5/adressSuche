@@ -6,6 +6,7 @@ combines multiple indexing strategies:
 1. Normalized text index (BK-Tree with Levenshtein distance)
 2. Phonetic index (German + Cologne phonetic codes)
 3. Consonant skeleton index
+4. Prefix Trie for fast prefix matching
 
 The system provides symmetric typo tolerance - it works regardless of whether
 the typo is in the query or the indexed data.
@@ -14,8 +15,9 @@ the typo is in the query or the indexed data.
 from __future__ import annotations
 
 import os
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from bktree import BKTree, MultiIndexBKTree
 from phonetic import (
@@ -44,6 +46,68 @@ PREFIX_MATCH_BONUS = 0.15     # Bonus for exact prefix matches
 PARTIAL_PREFIX_BONUS = 0.05   # Bonus for partial prefix matches
 
 
+class PrefixTrie:
+    """A Trie data structure for efficient prefix matching.
+    
+    This provides O(k) lookup where k is the prefix length,
+    instead of O(n) linear scan through all strings.
+    """
+    
+    def __init__(self):
+        self.root: Dict = {}
+        self._end_marker = '\x00'  # Special marker for end of word
+    
+    def insert(self, word: str, data: Any) -> None:
+        """Insert a word with associated data into the trie."""
+        if not word:
+            return
+        
+        node = self.root
+        for char in word.lower():
+            if char not in node:
+                node[char] = {}
+            node = node[char]
+        
+        # Store data at the end of the word
+        if self._end_marker not in node:
+            node[self._end_marker] = []
+        node[self._end_marker].append(data)
+    
+    def search_prefix(self, prefix: str, limit: int = 100) -> List[Any]:
+        """Find all entries that start with the given prefix."""
+        if not prefix:
+            return []
+        
+        # Navigate to prefix node
+        node = self.root
+        for char in prefix.lower():
+            if char not in node:
+                return []
+            node = node[char]
+        
+        # Collect all data below this node
+        results = []
+        self._collect_all(node, results, limit)
+        return results
+    
+    def _collect_all(self, node: Dict, results: List, limit: int) -> None:
+        """Recursively collect all data entries under a node."""
+        if len(results) >= limit:
+            return
+        
+        if self._end_marker in node:
+            for data in node[self._end_marker]:
+                if len(results) >= limit:
+                    return
+                results.append(data)
+        
+        for char, child in node.items():
+            if char != self._end_marker:
+                self._collect_all(child, results, limit)
+                if len(results) >= limit:
+                    return
+
+
 class FuzzySearchIndex:
     """High-performance fuzzy search index for street names.
     
@@ -54,6 +118,7 @@ class FuzzySearchIndex:
     2. `phonetic_german`: For phonetic similarity (German encoding)
     3. `phonetic_cologne`: For phonetic similarity (Cologne encoding)
     4. `consonant`: For consonant skeleton matching
+    5. `prefix_trie`: For fast prefix matching (O(k) instead of O(n))
     
     Example:
         >>> index = FuzzySearchIndex()
@@ -75,6 +140,12 @@ class FuzzySearchIndex:
         self.phonetic_german_tree = BKTree()
         self.phonetic_cologne_tree = BKTree()
         self.consonant_tree = BKTree()
+        
+        # Prefix trie for fast prefix matching
+        self.prefix_trie = PrefixTrie()
+        
+        # Pre-computed normalized names for fast lookup
+        self._normalized_cache: Dict[int, str] = {}
         
         # Data store for street metadata
         self.streets: Dict[int, Dict[str, Any]] = {}
@@ -125,6 +196,9 @@ class FuzzySearchIndex:
         phonetic_cologne = cologne_phonetic_phrase(name)
         cons_key = consonant_key(name)
         
+        # Cache normalized name for fast lookup
+        self._normalized_cache[street_id] = normalized.lower() if normalized else ""
+        
         # Insert into BK-Trees
         if normalized:
             self.normalized_tree.insert(normalized, street_id)
@@ -137,6 +211,10 @@ class FuzzySearchIndex:
         
         if cons_key:
             self.consonant_tree.insert(cons_key, street_id)
+        
+        # Insert into prefix trie for fast prefix matching
+        if normalized:
+            self.prefix_trie.insert(normalized, street_id)
         
         self._is_modified = True
     
@@ -155,7 +233,7 @@ class FuzzySearchIndex:
         - Edit distance from normalized query
         - Phonetic similarity
         - Consonant skeleton match
-        - Prefix matching
+        - Prefix matching (using Trie for O(k) lookup)
         
         Args:
             query: Search query (can contain typos)
@@ -170,42 +248,36 @@ class FuzzySearchIndex:
         if not query:
             return []
         
-        # Normalize the query
+        # Normalize the query once
         query_normalized = normalize_compact(query)
         query_search = normalize_string(query)
         query_german = german_phonetic_phrase(query)
         query_cologne = cologne_phonetic_phrase(query)
         query_cons = consonant_key(query)
+        query_lower = query_normalized.lower() if query_normalized else ""
+        city_lower = city.lower() if city else None
         
         # Collect candidates from all indices
         candidates: Dict[int, Dict[str, Any]] = {}
         
-        # First, add prefix matches (high priority)
-        query_lower = query_normalized.lower()
-        for street_id, street in self.streets.items():
-            name_normalized = normalize_compact(street.get('name', '')).lower()
-            
-            # Check city filter early
-            if city:
-                street_city = street.get('city', '').lower()
-                if not street_city.startswith(city.lower()):
+        # Use Trie for fast prefix matching (O(k) instead of O(n))
+        if query_lower:
+            prefix_matches = self.prefix_trie.search_prefix(query_lower, limit=limit * 10)
+            for street_id in prefix_matches:
+                if street_id not in self.streets:
                     continue
-            
-            # Prefix match
-            if name_normalized.startswith(query_lower):
+                
+                # Check city filter
+                if city_lower:
+                    street_city = self.streets[street_id].get('city', '').lower()
+                    if not street_city.startswith(city_lower):
+                        continue
+                
                 self._add_candidate(
                     candidates, street_id,
                     score=1.0,
                     source='prefix',
                     distance=0
-                )
-            # Substring match (lower priority)
-            elif query_lower in name_normalized:
-                self._add_candidate(
-                    candidates, street_id,
-                    score=0.85,
-                    source='substring',
-                    distance=1
                 )
         
         # Search normalized tree (BK-Tree fuzzy matching)
@@ -214,9 +286,9 @@ class FuzzySearchIndex:
             for _, street_id, dist in norm_results:
                 if street_id is not None:
                     # Check city filter
-                    if city and street_id in self.streets:
+                    if city_lower and street_id in self.streets:
                         street_city = self.streets[street_id].get('city', '').lower()
-                        if not street_city.startswith(city.lower()):
+                        if not street_city.startswith(city_lower):
                             continue
                     
                     self._add_candidate(
@@ -234,9 +306,9 @@ class FuzzySearchIndex:
             for _, street_id, dist in german_results:
                 if street_id is not None:
                     # Check city filter
-                    if city and street_id in self.streets:
+                    if city_lower and street_id in self.streets:
                         street_city = self.streets[street_id].get('city', '').lower()
-                        if not street_city.startswith(city.lower()):
+                        if not street_city.startswith(city_lower):
                             continue
                     
                     self._add_candidate(
@@ -251,9 +323,9 @@ class FuzzySearchIndex:
             for _, street_id, dist in cologne_results:
                 if street_id is not None:
                     # Check city filter
-                    if city and street_id in self.streets:
+                    if city_lower and street_id in self.streets:
                         street_city = self.streets[street_id].get('city', '').lower()
-                        if not street_city.startswith(city.lower()):
+                        if not street_city.startswith(city_lower):
                             continue
                     
                     self._add_candidate(
@@ -269,9 +341,9 @@ class FuzzySearchIndex:
             for _, street_id, dist in cons_results:
                 if street_id is not None:
                     # Check city filter
-                    if city and street_id in self.streets:
+                    if city_lower and street_id in self.streets:
                         street_city = self.streets[street_id].get('city', '').lower()
-                        if not street_city.startswith(city.lower()):
+                        if not street_city.startswith(city_lower):
                             continue
                     
                     self._add_candidate(
@@ -282,16 +354,32 @@ class FuzzySearchIndex:
                     )
         
         # Compute final scores and rank results
+        # Limit candidates to avoid processing too many
+        max_candidates = limit * 5  # Process at most 5x the limit
+        
         results = []
-        for street_id, match_info in candidates.items():
+        candidate_list = list(candidates.items())
+        
+        # Sort by initial score first to prioritize best matches
+        candidate_list.sort(key=lambda x: -x[1].get('score', 0))
+        
+        for street_id, match_info in candidate_list[:max_candidates]:
             street = self.streets.get(street_id)
             if not street:
                 continue
             
-            # Recompute score with additional phonetic matching
-            final_score = self._compute_final_score(
-                query, query_search, street, match_info
-            )
+            # For high-confidence matches (prefix/exact), skip expensive recomputation
+            base_score = match_info.get('score', 0.5)
+            source = match_info.get('source', '')
+            
+            if source == 'prefix' and base_score >= 0.95:
+                # High confidence prefix match - use base score directly
+                final_score = min(1.0, base_score + PREFIX_MATCH_BONUS)
+            else:
+                # Recompute score with additional phonetic matching
+                final_score = self._compute_final_score(
+                    query, query_search, street, match_info
+                )
             
             result = {**street, 'match_score': final_score} if include_scores else {**street}
             results.append((final_score, result))
@@ -308,7 +396,7 @@ class FuzzySearchIndex:
     ) -> List[Dict[str, Any]]:
         """Search for streets starting with the query prefix.
         
-        This is a faster search for prefix matching without typo tolerance.
+        This uses the Trie for O(k) lookup where k is the prefix length.
         Useful for autocomplete as the user types.
         
         Args:
@@ -323,18 +411,26 @@ class FuzzySearchIndex:
             return []
         
         query_normalized = normalize_compact(query).lower()
+        city_lower = city.lower() if city else None
+        
+        # Use Trie for fast prefix lookup
+        prefix_matches = self.prefix_trie.search_prefix(query_normalized, limit=limit * 5)
         
         results = []
-        for street_id, street in self.streets.items():
-            name_normalized = normalize_compact(street.get('name', '')).lower()
+        for street_id in prefix_matches:
+            street = self.streets.get(street_id)
+            if not street:
+                continue
             
-            if name_normalized.startswith(query_normalized):
-                if city:
-                    if not street.get('city', '').lower().startswith(city.lower()):
-                        continue
-                
-                score = 1.0 if name_normalized == query_normalized else 0.95
-                results.append((score, {**street, 'match_score': score}))
+            # Apply city filter
+            if city_lower:
+                if not street.get('city', '').lower().startswith(city_lower):
+                    continue
+            
+            # Use cached normalized name
+            name_normalized = self._normalized_cache.get(street_id, '')
+            score = 1.0 if name_normalized == query_normalized else 0.95
+            results.append((score, {**street, 'match_score': score}))
         
         results.sort(key=lambda x: (-x[0], x[1].get('name', '')))
         return [r[1] for r in results[:limit]]
@@ -370,11 +466,29 @@ class FuzzySearchIndex:
         street: Dict[str, Any],
         match_info: Dict[str, Any]
     ) -> float:
-        """Compute final match score combining all signals."""
+        """Compute final match score combining all signals.
+        
+        This is optimized to avoid redundant computations.
+        """
         base_score = match_info.get('score', 0.5)
         
-        # Add phonetic score
+        # Use cached normalized name if available
+        street_id = street.get('id')
         street_name = street.get('name', '')
+        
+        # For high base scores, use simplified scoring
+        if base_score >= 0.9:
+            # Quick check for prefix match bonus
+            street_compact = self._normalized_cache.get(street_id, '')
+            if not street_compact:
+                street_compact = normalize_compact(street_name).lower()
+            
+            query_compact = normalize_compact(query).lower()
+            if street_compact.startswith(query_compact):
+                return min(1.0, base_score + PREFIX_MATCH_BONUS)
+            return base_score
+        
+        # Full scoring for lower confidence matches
         phonetic_score = phonetic_match_score(query, street_name)
         
         # Add fuzzy score on normalized names
@@ -389,8 +503,11 @@ class FuzzySearchIndex:
         )
         
         # Boost for exact prefix matches
+        street_compact = self._normalized_cache.get(street_id, '')
+        if not street_compact:
+            street_compact = normalize_compact(street_name).lower()
+        
         query_compact = normalize_compact(query).lower()
-        street_compact = normalize_compact(street_name).lower()
         
         if street_compact.startswith(query_compact):
             final_score = min(1.0, final_score + PREFIX_MATCH_BONUS)
@@ -459,6 +576,15 @@ class FuzzySearchIndex:
             with open(streets_path, 'rb') as f:
                 instance.streets = pickle.load(f)
         
+        # Rebuild prefix trie and normalized cache from loaded streets
+        for street_id, street in instance.streets.items():
+            name = street.get('name', '')
+            if name:
+                normalized = normalize_compact(name)
+                if normalized:
+                    instance.prefix_trie.insert(normalized, street_id)
+                    instance._normalized_cache[street_id] = normalized.lower()
+        
         instance._is_loaded = True
         instance._is_modified = False
         
@@ -486,6 +612,8 @@ class FuzzySearchIndex:
         self.phonetic_german_tree = BKTree()
         self.phonetic_cologne_tree = BKTree()
         self.consonant_tree = BKTree()
+        self.prefix_trie = PrefixTrie()
+        self._normalized_cache.clear()
         self.streets.clear()
         self._is_modified = True
 
