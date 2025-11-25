@@ -37,19 +37,8 @@ FUZZY_TRIGRAM_CANDIDATE_LIMIT = 3000  # Max candidates to fetch from trigram sea
 UNICODE_MAX_CODEPOINT = 0x10FFFF  # Maximum valid Unicode code point
 UNICODE_FALLBACK_UPPER = "\uffff"  # Fallback upper bound for prefix range
 
-# Import the new fuzzy search module
-try:
-    from fuzzy_search import FuzzySearchIndex, get_fuzzy_index
-
-    FUZZY_SEARCH_AVAILABLE = True
-except ImportError:
-    FUZZY_SEARCH_AVAILABLE = False
-
-# Thread-safe lazy loading of fuzzy index using threading.Lock
+# Thread-safe lazy loading using threading.Lock
 import threading
-
-_fuzzy_index: Optional["FuzzySearchIndex"] = None
-_fuzzy_index_lock = threading.Lock()
 
 
 async def _geo_bounds(
@@ -192,39 +181,12 @@ app.add_middleware(
 )
 
 
-def _load_fuzzy_index() -> Optional["FuzzySearchIndex"]:
-    """Load the fuzzy search index if available (thread-safe)."""
-    global _fuzzy_index
 
-    # Fast path: already loaded
-    if _fuzzy_index is not None:
-        return _fuzzy_index
-
-    if not FUZZY_SEARCH_AVAILABLE:
-        return None
-
-    # Thread-safe initialization
-    with _fuzzy_index_lock:
-        # Double-check after acquiring lock
-        if _fuzzy_index is not None:
-            return _fuzzy_index
-
-        try:
-            loaded_index = get_fuzzy_index()
-            if len(loaded_index.streets) > 0:
-                _fuzzy_index = loaded_index
-                return _fuzzy_index
-        except Exception:
-            pass
-
-    return None
 
 
 @app.on_event("startup")
 async def _on_startup():
     init_db()
-    # Try to load fuzzy index on startup
-    _load_fuzzy_index()
 
 
 @app.get("/")
@@ -587,54 +549,7 @@ async def autocomplete(
         local.sort(key=lambda t: (-t[1], t[0].name, t[0].city))
         return local[: max(limit * 5, 50)]
 
-    # Stage F: BK-Tree fuzzy search using Levenshtein distance
-    def bktree_fuzzy_search() -> list[tuple[StreetAutocompleteResponse, float, int]]:
-        """Use BK-Tree index for typo-tolerant search with Levenshtein distance."""
-        fuzzy_idx = _load_fuzzy_index()
-        if fuzzy_idx is None or len(fuzzy_idx.streets) == 0:
-            return []
 
-        local: list[tuple[StreetAutocompleteResponse, float, int]] = []
-        try:
-            # Search with max_distance=2 for typo tolerance
-            results = fuzzy_idx.search(
-                query=query,
-                max_distance=2,
-                city=city,
-                limit=max(limit * 5, 50),
-                include_scores=True,
-            )
-
-            for street_data in results:
-                street_id = street_data.get("id")
-                if street_id is None:
-                    continue
-
-                base_score = street_data.get("match_score", 0.7)
-
-                resp = StreetAutocompleteResponse(
-                    street_id=int(street_id),
-                    name=str(street_data.get("name", "")),
-                    city=str(street_data.get("city", "")),
-                    postal_code=street_data.get("postal_code"),
-                    latitude=float(street_data.get("latitude", 0)),
-                    longitude=float(street_data.get("longitude", 0)),
-                    match_score=base_score,
-                )
-
-                if latitude is not None and longitude is not None:
-                    d = haversine_distance(
-                        latitude, longitude, resp.latitude, resp.longitude
-                    )
-                    resp.distance_km = round(d, 2)
-                    base_score = _distance_penalized(base_score, d)
-
-                local.append((resp, base_score, street_id))
-        except Exception as e:
-            # Log the error for debugging but continue with other stages
-            logger.debug(f"BK-Tree search failed: {e}")
-
-        return local
 
     # Stage G: Fuzzy trigram search with OR matching for typo tolerance
     async def fuzzy_trigram_search() -> list[
@@ -788,11 +703,8 @@ async def autocomplete(
         1 for _, sc, _ in all_fast_results if sc >= HIGH_QUALITY_SCORE_THRESHOLD
     )
 
-    # Stage F: BK-Tree fuzzy search (sync, runs quickly from in-memory index)
-    # Only run if we still don't have enough results
+    # Stage F: (removed - BK-Tree fuzzy search no longer used)
     stage_f = []
-    if not has_good_fast_results and high_score_count < limit:
-        stage_f = bktree_fuzzy_search()
 
     # Only run expensive stages if we don't have enough good results
     stage_c = []

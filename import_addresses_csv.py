@@ -323,15 +323,7 @@ def import_addresses(csv_path: str, commit_every: int = 1000, dry_run: bool = Fa
     print(f"Addresses skipped (existing): {skipped_existing}")
     print(f"Rows skipped (no coords): {skipped_no_coords}")
     
-    # Rebuild fuzzy search index after import
-    if inserted_streets > 0:
-        print()
-        print("Rebuilding fuzzy search index...")
-        try:
-            from database import rebuild_fuzzy_index
-            rebuild_fuzzy_index(verbose=True)
-        except Exception as e:
-            print(f"Warning: Could not rebuild fuzzy index: {e}")
+
 
 
 def preview_csv(csv_path: str, rows: int = 5) -> None:
