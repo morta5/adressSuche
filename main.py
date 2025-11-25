@@ -555,7 +555,12 @@ async def autocomplete(
     async def fuzzy_trigram_search() -> list[
         tuple[StreetAutocompleteResponse, float, int]
     ]:
-        """Use trigram AND matching to find candidates with typos."""
+        """Use trigram OR matching to find candidates with typos.
+        
+        Strategy: Use OR instead of AND with multiple trigrams from different
+        parts of the string. This allows matching even when some trigrams are
+        affected by typos. The Levenshtein distance filter then removes false positives.
+        """
         qc_lower = qc.lower() if qc else ""
         if len(qc_lower) < 3:
             return []
@@ -574,27 +579,37 @@ async def autocomplete(
         local: list[tuple[StreetAutocompleteResponse, float, int]] = []
         added = set()
 
-        # Strategy: Use multiple AND trigrams from the middle/end of the string
-        # These are less affected by typos at the beginning
-        # For "galbelstrasse", use trigrams like "bel", "els", "lst", "str"
-        # which match "geibelstrasse"
+        # Strategy: Use OR matching with trigrams from START, MIDDLE, and END
+        # This handles typos at any position by ensuring we match on multiple regions
+        # - Start trigrams: help match prefix
+        # - Middle trigrams: help match core name
+        # - End trigrams: help match suffix (e.g., "strasse")
 
-        if len(all_trigrams) >= 6:
-            # Use 4 trigrams from the middle portion (indices 3-6 typically)
-            # This covers the suffix which is more stable
-            start_idx = max(1, len(all_trigrams) // 3)
-            and_trigrams = all_trigrams[start_idx : start_idx + 4]
+        if len(all_trigrams) >= 9:
+            # Long strings: pick 2 from start (idx 1-2), 2 from middle, 3 from end
+            start_tris = all_trigrams[1:3]  # Skip very first to avoid typos
+            mid_idx = len(all_trigrams) // 2
+            mid_tris = all_trigrams[mid_idx - 1 : mid_idx + 1]
+            end_tris = all_trigrams[-3:]
+            or_trigrams = start_tris + mid_tris + end_tris
+        elif len(all_trigrams) >= 6:
+            # Medium strings: pick 1 from start, 2 from middle, 2 from end
+            start_tris = all_trigrams[1:2]
+            mid_idx = len(all_trigrams) // 2
+            mid_tris = all_trigrams[mid_idx - 1 : mid_idx + 1]
+            end_tris = all_trigrams[-2:]
+            or_trigrams = start_tris + mid_tris + end_tris
         elif len(all_trigrams) >= 4:
-            and_trigrams = all_trigrams[
-                1:5
-            ]  # Skip first trigram (most likely to have typo)
+            # Short strings: pick from start and end
+            or_trigrams = all_trigrams[1:2] + all_trigrams[-2:]
         else:
-            and_trigrams = all_trigrams
+            or_trigrams = all_trigrams
 
-        and_pattern = " AND ".join(and_trigrams)
+        # Use OR matching - will match if ANY trigram matches
+        or_pattern = " OR ".join(or_trigrams)
 
         params: Dict[str, Any] = {
-            "pattern": and_pattern,
+            "pattern": or_pattern,
             "limit": FUZZY_TRIGRAM_CANDIDATE_LIMIT,
         }
 

@@ -58,6 +58,12 @@ test_queries:
     expected_result: "Geibelstraße"
     description: "Typo: 'galbelstraße' should find 'Geibelstraße'"
   
+  - url: "/autocomplete?query=hannes-mayer-straße+münchen&limit=10&latitude=54.0863&longitude=9.9757"
+    expected_time_ms: 500
+    expected_result: "Hannes-Meyer-Straße"
+    expected_city: "München"
+    description: "Typo in middle: 'mayer' should find 'meyer' in München"
+  
   # City-in-query parsing (should be < 300ms)
   - url: "/autocomplete?query=jungfernstieg+hamburg&limit=10&latitude=54.0863&longitude=9.9757"
     expected_time_ms: 300

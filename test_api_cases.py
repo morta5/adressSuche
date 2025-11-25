@@ -108,6 +108,16 @@ TEST_CASES: List[APITestCase] = [
         max_time_ms=300,
         description="Typo query: 'galbelstraße' should find 'Geibelstraße'"
     ),
+    APITestCase(
+        name="hannes_mayer_typo",
+        query="hannes-mayer-straße münchen",
+        latitude=54.0863,
+        longitude=9.9757,
+        expected_result="Hannes-Meyer-Straße",
+        expected_city="München",
+        max_time_ms=500,
+        description="Typo in middle: 'hannes-mayer' should find 'hannes-meyer' in München"
+    ),
     
     # City-in-query parsing
     APITestCase(
