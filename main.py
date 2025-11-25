@@ -31,6 +31,10 @@ from utils import (
 HIGH_QUALITY_SCORE_THRESHOLD = 0.7  # Score threshold for early exit optimization
 FUZZY_TRIGRAM_CANDIDATE_LIMIT = 3000  # Max candidates to fetch from trigram search
 
+# Unicode constants for prefix range queries
+UNICODE_MAX_CODEPOINT = 0x10FFFF  # Maximum valid Unicode code point
+UNICODE_FALLBACK_UPPER = "\uffff"  # Fallback upper bound for prefix range
+
 # Import the new fuzzy search module
 try:
     from fuzzy_search import FuzzySearchIndex, get_fuzzy_index
@@ -184,32 +188,59 @@ async def autocomplete(
     processed_ids = set()
     candidates: list[tuple[StreetAutocompleteResponse, float]] = []
 
-    # Stage A: Exact prefix on name and normalized_name (OPTIMIZED - single query)
+    # Stage A: Exact prefix on name and normalized_name (OPTIMIZED - uses range queries for index)
     async def exact_prefix() -> list[tuple[StreetAutocompleteResponse, float, int]]:
         local = []
         added = set()
         
-        # Single combined query for the main query variants
-        params: Dict[str, Any] = {"limit": limit * 4}
-        where_parts = []
+        # Helper to get the end of prefix range (increment last character)
+        def prefix_end(prefix: str) -> str:
+            if not prefix:
+                return ""
+            # Find the last character that can be incremented
+            chars = list(prefix)
+            for i in range(len(chars) - 1, -1, -1):
+                if ord(chars[i]) < UNICODE_MAX_CODEPOINT:  # Can increment
+                    chars[i] = chr(ord(chars[i]) + 1)
+                    return "".join(chars[:i+1])
+            return prefix + UNICODE_FALLBACK_UPPER  # Fallback for maximum codepoint
         
-        # Original query
-        where_parts.append("name LIKE :q1")
-        params["q1"] = f"{query}%"
+        # Use UNION of two indexed range queries instead of OR (which causes full scan)
+        params: Dict[str, Any] = {
+            "q1_start": query,
+            "q1_end": prefix_end(query),
+            "limit": limit * 4
+        }
         
-        # Normalized query
+        # Build the SQL with UNION to use index on both queries
         if qc and qc != query:
-            where_parts.append("normalized_name LIKE :q2")
-            params["q2"] = f"{qc}%"
+            # Both original name and normalized name
+            params["q2_start"] = qc
+            params["q2_end"] = prefix_end(qc)
+            sql = """
+                SELECT id, name, city, postal_code, latitude, longitude FROM (
+                    SELECT id, name, city, postal_code, latitude, longitude
+                    FROM streets
+                    WHERE name >= :q1_start AND name < :q1_end
+                    UNION
+                    SELECT id, name, city, postal_code, latitude, longitude
+                    FROM streets
+                    WHERE normalized_name >= :q2_start AND normalized_name < :q2_end
+                ) sub
+            """
+        else:
+            # Only original name
+            sql = """
+                SELECT id, name, city, postal_code, latitude, longitude
+                FROM streets
+                WHERE name >= :q1_start AND name < :q1_end
+            """
         
-        sql = f"""
-            SELECT id, name, city, postal_code, latitude, longitude
-            FROM streets
-            WHERE ({' OR '.join(where_parts)})
-        """
         if city:
-            sql += " AND city LIKE :city"
+            # Wrap with city filter - explicitly list columns instead of SELECT *
             params["city"] = f"{city}%"
+            sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({sql}) WHERE city LIKE :city"
+        
         sql += " LIMIT :limit"
         
         try:
@@ -618,31 +649,50 @@ async def autocomplete(
     # Stage A: Exact prefix (fast, uses index)
     stage_a = await exact_prefix()
     
-    # Stage B: Trigram prefix search (fast, uses FTS5 index)  
-    stage_b = await trigram_search()
+    # Check if Stage A found any exact prefix matches (score ~= 1.0 or 0.97)
+    # If so, skip expensive fuzzy stages as we likely have good results
+    stage_a_has_matches = len(stage_a) > 0
+    stage_a_has_good_match = any(sc >= HIGH_QUALITY_SCORE_THRESHOLD for _, sc, _ in stage_a)
+    
+    # Stage B: Trigram prefix search (fast, uses FTS5 index)
+    # Only run if Stage A didn't find enough results
+    stage_b = []
+    if len(stage_a) < limit:
+        stage_b = await trigram_search()
+    
+    # Early exit check after fast stages
+    fast_results = [*stage_a, *stage_b]
+    has_good_fast_results = len(fast_results) >= limit or (stage_a_has_matches and stage_a_has_good_match)
     
     # Stage G: Fuzzy trigram OR (moderate speed, good for typos)
-    stage_g = await fuzzy_trigram_search()
+    # ONLY run if we don't have good results from exact matching
+    # This is expensive for queries with common suffixes like "straße"
+    stage_g = []
+    if not has_good_fast_results:
+        stage_g = await fuzzy_trigram_search()
     
-    # Early exit check - if we have enough high-quality results, skip expensive stages
-    fast_results = [*stage_a, *stage_b, *stage_g]
-    high_score_count = sum(1 for _, sc, _ in fast_results if sc >= HIGH_QUALITY_SCORE_THRESHOLD)
+    # Combined results
+    all_fast_results = [*fast_results, *stage_g]
+    high_score_count = sum(1 for _, sc, _ in all_fast_results if sc >= HIGH_QUALITY_SCORE_THRESHOLD)
     
     # Stage F: BK-Tree fuzzy search (sync, runs quickly from in-memory index)
-    stage_f = bktree_fuzzy_search()
+    # Only run if we still don't have enough results
+    stage_f = []
+    if not has_good_fast_results and high_score_count < limit:
+        stage_f = bktree_fuzzy_search()
     
     # Only run expensive stages if we don't have enough good results
     stage_c = []
     stage_d = []
     stage_e = []
     
-    if high_score_count < limit:
+    if high_score_count < limit and not has_good_fast_results:
         # Stage D: Phonetic (uses index, moderate speed)
         stage_d = await phonetic_stage()
     
     # Skip Stage C (sql_typos) as it's very slow and Stage G handles typos better
     # Only run if we have very few results
-    if not fast_results and not stage_d and not stage_f:
+    if not all_fast_results and not stage_d and not stage_f:
         stage_c = await sql_typos()
         stage_e = await broad_prefix_fallback()
     
