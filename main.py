@@ -37,6 +37,12 @@ FUZZY_TRIGRAM_CANDIDATE_LIMIT = 3000  # Max candidates to fetch from trigram sea
 UNICODE_MAX_CODEPOINT = 0x10FFFF  # Maximum valid Unicode code point
 UNICODE_FALLBACK_UPPER = "\uffff"  # Fallback upper bound for prefix range
 
+# Trigram selection thresholds for fuzzy search
+# These control how many trigrams are selected based on query length
+TRIGRAM_LONG_THRESHOLD = 9  # Queries with >= 9 trigrams use full selection
+TRIGRAM_MEDIUM_THRESHOLD = 6  # Queries with >= 6 trigrams use medium selection
+TRIGRAM_SHORT_THRESHOLD = 4  # Queries with >= 4 trigrams use short selection
+
 # Thread-safe lazy loading using threading.Lock
 import threading
 
@@ -164,6 +170,41 @@ def _extract_city_from_query(
             return street_query, detected_city
 
     return query, None
+
+
+def _select_fuzzy_trigrams(all_trigrams: list[str]) -> list[str]:
+    """Select trigrams from START, MIDDLE, and END regions for fuzzy matching.
+    
+    This handles typos at any position by ensuring we match on multiple regions:
+    - Start trigrams: help match prefix
+    - Middle trigrams: help match core name
+    - End trigrams: help match suffix (e.g., "strasse")
+    
+    Args:
+        all_trigrams: List of all trigrams from the query
+        
+    Returns:
+        Selected trigrams for OR matching
+    """
+    if len(all_trigrams) >= TRIGRAM_LONG_THRESHOLD:
+        # Long strings: pick 2 from start (idx 1-2), 2 from middle, 3 from end
+        start_tris = all_trigrams[1:3]  # Skip very first to avoid typos
+        mid_idx = len(all_trigrams) // 2
+        mid_tris = all_trigrams[mid_idx - 1 : mid_idx + 1]
+        end_tris = all_trigrams[-3:]
+        return start_tris + mid_tris + end_tris
+    elif len(all_trigrams) >= TRIGRAM_MEDIUM_THRESHOLD:
+        # Medium strings: pick 1 from start, 2 from middle, 2 from end
+        start_tris = all_trigrams[1:2]
+        mid_idx = len(all_trigrams) // 2
+        mid_tris = all_trigrams[mid_idx - 1 : mid_idx + 1]
+        end_tris = all_trigrams[-2:]
+        return start_tris + mid_tris + end_tris
+    elif len(all_trigrams) >= TRIGRAM_SHORT_THRESHOLD:
+        # Short strings: pick from start and end
+        return all_trigrams[1:2] + all_trigrams[-2:]
+    else:
+        return all_trigrams
 
 
 app = FastAPI(
@@ -579,31 +620,9 @@ async def autocomplete(
         local: list[tuple[StreetAutocompleteResponse, float, int]] = []
         added = set()
 
-        # Strategy: Use OR matching with trigrams from START, MIDDLE, and END
+        # Select trigrams from START, MIDDLE, and END regions
         # This handles typos at any position by ensuring we match on multiple regions
-        # - Start trigrams: help match prefix
-        # - Middle trigrams: help match core name
-        # - End trigrams: help match suffix (e.g., "strasse")
-
-        if len(all_trigrams) >= 9:
-            # Long strings: pick 2 from start (idx 1-2), 2 from middle, 3 from end
-            start_tris = all_trigrams[1:3]  # Skip very first to avoid typos
-            mid_idx = len(all_trigrams) // 2
-            mid_tris = all_trigrams[mid_idx - 1 : mid_idx + 1]
-            end_tris = all_trigrams[-3:]
-            or_trigrams = start_tris + mid_tris + end_tris
-        elif len(all_trigrams) >= 6:
-            # Medium strings: pick 1 from start, 2 from middle, 2 from end
-            start_tris = all_trigrams[1:2]
-            mid_idx = len(all_trigrams) // 2
-            mid_tris = all_trigrams[mid_idx - 1 : mid_idx + 1]
-            end_tris = all_trigrams[-2:]
-            or_trigrams = start_tris + mid_tris + end_tris
-        elif len(all_trigrams) >= 4:
-            # Short strings: pick from start and end
-            or_trigrams = all_trigrams[1:2] + all_trigrams[-2:]
-        else:
-            or_trigrams = all_trigrams
+        or_trigrams = _select_fuzzy_trigrams(all_trigrams)
 
         # Use OR matching - will match if ANY trigram matches
         or_pattern = " OR ".join(or_trigrams)
