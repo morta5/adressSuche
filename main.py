@@ -904,6 +904,11 @@ async def validate_address(
 # Maximum distance in kilometers for reverse geocoding to return a result
 REVERSE_GEOCODE_MAX_DISTANCE_KM = 0.1  # 100 meters
 
+# Optimization: Assume no single street segment spans more than this many degrees of latitude.
+# This allows us to bound the min_lat search, significantly speeding up queries.
+# 0.1 degrees is approx 11km, which is safe for most street segments.
+MAX_SEGMENT_LAT_SPAN = 0.1
+
 
 @app.get("/reverse", response_model=AddressValidationResponse)
 async def reverse_geocode(
@@ -921,6 +926,9 @@ async def reverse_geocode(
     If no address is found, falls back to finding the nearest street segment.
     Returns the coordinates of the closest point on the street.
 
+    If max_distance_km is not provided, it uses an exponential backoff strategy,
+    searching increasingly larger areas (up to 5km) until a match is found.
+
     Args:
         latitude: Latitude coordinate to search near
         longitude: Longitude coordinate to search near
@@ -929,35 +937,43 @@ async def reverse_geocode(
     Returns:
         AddressValidationResponse with the nearest address or street if found
     """
-    max_dist = (
-        max_distance_km
-        if max_distance_km is not None
-        else REVERSE_GEOCODE_MAX_DISTANCE_KM
-    )
+    # Determine search steps
+    if max_distance_km is not None:
+        search_distances = [max_distance_km]
+    else:
+        # Exponential backoff steps optimized to minimize queries:
+        # 1. Very close (100m) - covers 90% of urban use cases
+        # 2. Medium (1km) - covers most suburban/rural roads
+        # 3. Far (5km) - fallback for remote highways
+        search_distances = [0.1, 1.0, 5.0]
 
-    # Calculate bounding box for initial filtering (performance optimization)
-    # Use a slightly larger radius to account for edge cases
-    search_radius_km = max_dist * 1.5
-    lat_min, lat_max, lon_min, lon_max = await _geo_bounds(
-        latitude, longitude, search_radius_km
-    )
+    for dist in search_distances:
+        # Calculate bounding box for filtering
+        # Use a slightly larger radius to account for edge cases
+        search_radius_km = dist * 1.5
+        lat_min, lat_max, lon_min, lon_max = await _geo_bounds(
+            latitude, longitude, search_radius_km
+        )
 
-    params = {
-        "lat_min": lat_min,
-        "lat_max": lat_max,
-        "lon_min": lon_min,
-        "lon_max": lon_max,
-    }
+        params = {
+            "lat_min": lat_min,
+            "lat_max": lat_max,
+            "lon_min": lon_min,
+            "lon_max": lon_max,
+        }
 
-    # First, try to find the nearest address (house number)
-    address_result = await _find_nearest_address(db, latitude, longitude, params, max_dist)
-    if address_result:
-        return address_result
+        # First, try to find the nearest address (house number)
+        # Only if dist is small enough to make sense for house numbers (e.g. < 200m)
+        # If we are searching 2km away, we probably just want the street/highway.
+        if dist <= 0.2:
+            address_result = await _find_nearest_address(db, latitude, longitude, params, dist)
+            if address_result:
+                return address_result
 
-    # No address found, fall back to finding the nearest street segment
-    street_result = await _find_nearest_street_segment(db, latitude, longitude, params, max_dist)
-    if street_result:
-        return street_result
+        # No address found (or skipped), fall back to finding the nearest street segment
+        street_result = await _find_nearest_street_segment(db, latitude, longitude, params, dist)
+        if street_result:
+            return street_result
 
     return AddressValidationResponse(exists=False)
 
@@ -1039,6 +1055,12 @@ async def _find_nearest_street_segment(
     """Find the nearest street segment within the bounding box."""
     # Query street segments that might be nearby
     # We check segments whose bounding box overlaps with our search area
+    # Use a spatial index hint if possible, but standard B-Tree on min/max columns works well
+    
+    # Optimization: Add lower bound for min_lat to use the index effectively
+    # This prevents scanning the entire table for segments starting south of the search area
+    params["min_lat_lower"] = params["lat_min"] - MAX_SEGMENT_LAT_SPAN
+
     sql = """
         SELECT
             seg.id as segment_id,
@@ -1053,8 +1075,8 @@ async def _find_nearest_street_segment(
         FROM street_segments seg
         JOIN streets s ON s.id = seg.street_id
         WHERE seg.max_lat >= :lat_min AND seg.min_lat <= :lat_max
+          AND seg.min_lat >= :min_lat_lower
           AND seg.max_lon >= :lon_min AND seg.min_lon <= :lon_max
-        LIMIT 2000
     """
 
     try:

@@ -105,6 +105,7 @@ class StreetSegment(Base):
     __table_args__ = (
         Index('idx_segment_street', 'street_id'),
         Index('idx_segment_bbox', 'min_lat', 'max_lat', 'min_lon', 'max_lon'),
+        UniqueConstraint('street_id', 'start_lat', 'start_lon', 'end_lat', 'end_lon', name='uq_street_segment'),
     )
 
 

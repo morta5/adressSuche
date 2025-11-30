@@ -92,8 +92,12 @@ def point_to_segment_distance(
     t = max(0.0, min(1.0, t))
     
     # Find the closest point on the segment
-    closest_lon = ax + t * abx
+    # Note: closest_x is still scaled by cos_lat
+    closest_x = ax + t * abx
     closest_lat = ay + t * aby
+    
+    # Unscale longitude to get back to degrees
+    closest_lon = closest_x / cos_lat if abs(cos_lat) > 1e-6 else point_lon
     
     # Calculate distance using haversine for accuracy
     distance = haversine_distance(point_lat, point_lon, closest_lat, closest_lon)

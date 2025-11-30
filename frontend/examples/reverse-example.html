@@ -218,13 +218,18 @@
                     <div class="field">
                         <label for="max_distance">Max. Distanz (km)</label>
                         <input
-                            id="max_distance"
-                            class="small"
                             type="number"
+                            id="max_distance"
                             step="0.01"
-                            value="0.1"
+                            min="0.01"
+                            placeholder="Auto"
+                            class="small"
                         />
+                        <small style="font-size: 11px; color: #666">Leer = Auto-Expand</small>
                     </div>
+                    <button id="btn_query" class="btn btn-primary">
+                        Suchen
+                    </button>
 
                     <div style="display: flex; gap: 8px; align-items: flex-end">
                         <button
@@ -365,7 +370,9 @@
                     els.lon.value = lng.toFixed(6);
                     if (marker) map.removeLayer(marker);
                     marker = L.marker([lat, lng]).addTo(map);
-                    callReverse(lat, lng, parseFloat(els.max.value));
+                    
+                    const maxVal = els.max.value === "" ? undefined : parseFloat(els.max.value);
+                    callReverse(lat, lng, maxVal);
                 });
             }
 
@@ -448,7 +455,8 @@
                 if (
                     maxDistanceKm !== undefined &&
                     maxDistanceKm !== null &&
-                    String(maxDistanceKm) !== ""
+                    String(maxDistanceKm) !== "" &&
+                    !Number.isNaN(maxDistanceKm)
                 )
                     params.set("max_distance_km", String(maxDistanceKm));
 
@@ -526,7 +534,10 @@
                         els.lat.value = lat.toFixed(6);
                         els.lon.value = lon.toFixed(6);
                         setStatus("Position ermittelt — Suche Adresse…");
-                        callReverse(lat, lon, parseFloat(els.max.value));
+                        
+                        const maxVal = els.max.value === "" ? undefined : parseFloat(els.max.value);
+                        callReverse(lat, lon, maxVal);
+                        
                         if (marker) map.removeLayer(marker);
                         marker = L.marker([lat, lon]).addTo(map);
                         map.panTo([lat, lon]);
