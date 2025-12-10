@@ -23,8 +23,11 @@ from utils import (
 )
 
 # SQLite database file path
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./autocomplete.db")
-ASYNC_DATABASE_URL = os.getenv("ASYNC_DATABASE_URL", "sqlite+aiosqlite:///./autocomplete.db")
+DEFAULT_DB_PATH = "./autocomplete_v2.db"
+_current_db_path = DEFAULT_DB_PATH
+
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DEFAULT_DB_PATH}")
+ASYNC_DATABASE_URL = os.getenv("ASYNC_DATABASE_URL", f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}")
 BASE_DIR = Path(__file__).resolve().parent
 SPELLFIX_PATH = BASE_DIR / "spellfix.so"
 
@@ -35,10 +38,40 @@ engine = create_engine(
     echo=False,
 )
 
+def configure_db(db_path: str):
+    """Reconfigure the database connection to use a different file."""
+    global engine, SessionLocal, async_engine, AsyncSessionLocal, _current_db_path, DATABASE_URL, ASYNC_DATABASE_URL
+    
+    _current_db_path = db_path
+    DATABASE_URL = f"sqlite:///{db_path}"
+    ASYNC_DATABASE_URL = f"sqlite+aiosqlite:///{db_path}"
+    
+    # Recreate sync engine
+    engine.dispose()
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        echo=False,
+    )
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    
+    # Recreate async engine
+    async_engine = create_async_engine(
+        ASYNC_DATABASE_URL,
+        echo=False,
+        pool_size=20,
+        max_overflow=10,
+    )
+    AsyncSessionLocal = async_sessionmaker(
+        async_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
 # Custom creator for aiosqlite to register functions
 async def get_aiosqlite_connection():
     """Create aiosqlite connection with custom functions registered."""
-    conn = await aiosqlite.connect("./autocomplete.db", check_same_thread=False)
+    conn = await aiosqlite.connect(_current_db_path, check_same_thread=False)
 
     # Register custom functions on the underlying connection
     await conn.enable_load_extension(True)
@@ -234,7 +267,7 @@ AsyncSessionLocal = async_sessionmaker(
 def init_db():
     """Initialize the database by creating all tables and ensuring derived columns."""
     # Ensure database directory exists
-    db_path = Path("./autocomplete.db")
+    db_path = Path(_current_db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     
     Base.metadata.create_all(bind=engine)
@@ -242,29 +275,7 @@ def init_db():
     _ensure_phonetic_columns()
     _ensure_trigram_index()
     _ensure_spellfix_index()
-
-
-def rebuild_fuzzy_index(verbose: bool = True) -> bool:
-    """Rebuild the BK-Tree fuzzy search index from the database.
-    
-    Args:
-        verbose: Print progress information
-        
-    Returns:
-        True if index was successfully rebuilt, False otherwise
-    """
-    try:
-        from build_fuzzy_index import build_index
-        build_index(force=True, verbose=verbose)
-        return True
-    except ImportError:
-        if verbose:
-            print("Warning: build_fuzzy_index module not available")
-        return False
-    except Exception as e:
-        if verbose:
-            print(f"Warning: Failed to rebuild fuzzy index: {e}")
-        return False
+    _ensure_street_segments_indexes()
 
 
 def get_db():
@@ -735,6 +746,46 @@ def _ensure_trigram_index() -> None:
                     "WHERE normalized_name != ''"
                 )
             )
+
+
+def _ensure_street_segments_indexes() -> None:
+    """Ensure street_segments table has proper indexes for efficient spatial queries."""
+    with engine.begin() as conn:
+        # Check if street_segments table exists
+        result = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='street_segments'")
+        )
+        if not result.fetchone():
+            return  # Table doesn't exist yet
+
+        # Create indexes if they don't exist
+        # Optimized covering index for bounding box queries (used in reverse geocoding)
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_segment_bbox "
+                "ON street_segments (min_lat, max_lat, min_lon, max_lon)"
+            )
+        )
+        
+        # Legacy/Redundant indexes (kept for safety, but idx_segment_bbox covers lat_range)
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_segment_lat_range "
+                "ON street_segments (min_lat, max_lat)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_segment_lon_range "
+                "ON street_segments (min_lon, max_lon)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_segment_street_id "
+                "ON street_segments (street_id)"
+            )
+        )
 
 
 def _generate_multiword_patterns(words: List[str]) -> List[str]:
