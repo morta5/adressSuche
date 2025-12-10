@@ -34,4 +34,8 @@ else
   echo "Non-sqlite DATABASE_URL detected; skipping DB download"
 fi
 
+if [ "$#" -eq 0 ]; then
+  set -- uvicorn main:app --host 0.0.0.0 --port 8001
+fi
+
 exec "$@"
