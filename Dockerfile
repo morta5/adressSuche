@@ -12,7 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     DATABASE_URL=sqlite:////data/autocomplete.db \
     ASYNC_DATABASE_URL=sqlite+aiosqlite:////data/autocomplete.db \
-    DB_DOWNLOAD_URL=https://cloud.farshidhakimy.de/s/ScfdTePfPc3oaR6/download
+    DB_DOWNLOAD_URL=https://cloud.farshidhakimy.de/s/4A82YZZzXtMzkxs/download
 
 WORKDIR /app
 
