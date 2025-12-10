@@ -10,10 +10,7 @@ from __future__ import annotations
 
 import gc
 import os
-import logging
-import argparse
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
-from collections import OrderedDict
 
 from osmium import SimpleHandler
 from osmium.geom import WKBFactory
@@ -21,12 +18,11 @@ from shapely import wkb
 from shapely.ops import polygonize
 from shapely.geometry import MultiPolygon, Point
 from shapely.strtree import STRtree
-from sqlalchemy import select, update, or_, text
+from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-import database
-from database import init_db, configure_db
-from models import Address, Street, StreetSegment
+from database import SessionLocal, init_db
+from models import Address, Street
 
 
 class BoundaryRelationCollector(SimpleHandler):
@@ -66,7 +62,7 @@ class BoundaryRelationCollector(SimpleHandler):
             }
 
         for member in relation.members:
-            if member.type == 'w' and member.role in {'outer', ''}:
+            if member.type == 'w':
                 record['member_way_ids'].append(member.ref)  # type: ignore[index]
                 self.required_way_ids.add(member.ref)
 
@@ -100,8 +96,6 @@ class FilteredWayCollector(SimpleHandler):
 def _build_geometries(relations: Sequence[Dict[str, object]], ways: Dict[int, object]) -> Tuple[
     Dict[str, MultiPolygon],
     Dict[str, MultiPolygon],
-    Dict[str, MultiPolygon],
-    Dict[str, MultiPolygon],
     Dict[str, str],
     Dict[str, MultiPolygon],
     Dict[str, MultiPolygon],
@@ -109,9 +103,7 @@ def _build_geometries(relations: Sequence[Dict[str, object]], ways: Dict[int, ob
     """Assemble shapely multipolygons for all stored relation records."""
 
     postal_areas: Dict[str, MultiPolygon] = {}
-    level8_areas: Dict[str, MultiPolygon] = {}
-    level7_areas: Dict[str, MultiPolygon] = {}
-    level6_areas: Dict[str, MultiPolygon] = {}
+    municipality_areas: Dict[str, MultiPolygon] = {}
     municipality_refs: Dict[str, str] = {}
     borough_areas: Dict[str, MultiPolygon] = {}
     suburb_areas: Dict[str, MultiPolygon] = {}
@@ -125,17 +117,11 @@ def _build_geometries(relations: Sequence[Dict[str, object]], ways: Dict[int, ob
 
         polygons = list(polygonize(line_geoms))
         if not polygons:
-            if record.get('admin_level') == '6':
-                logger.warning("Failed to polygonize Level 6 area: %s (missing segments or open ring)", record.get('name'))
             continue
 
         multipolygon = MultiPolygon(polygons)
         if multipolygon.is_empty or not multipolygon.is_valid:
             multipolygon = multipolygon.buffer(0)
-        
-        # Simplify geometry to reduce memory usage
-        multipolygon = multipolygon.simplify(0.0001, preserve_topology=True)
-        
         if multipolygon.is_empty:
             continue
 
@@ -145,23 +131,17 @@ def _build_geometries(relations: Sequence[Dict[str, object]], ways: Dict[int, ob
         else:
             admin_level = str(record['admin_level'])
             name = str(record['name'])
-            
             if admin_level == '8':
-                level8_areas[name] = multipolygon
+                municipality_areas[name] = multipolygon
                 ref = record.get('ref')
                 if ref:
                     municipality_refs[name] = str(ref)
-            elif admin_level == '7':
-                level7_areas[name] = multipolygon
-            elif admin_level == '6':
-                level6_areas[name] = multipolygon
-                logger.info("Built geometry for Level 6 city: %s", name)
             elif admin_level == '9':
                 borough_areas[name] = multipolygon
             elif admin_level == '10':
                 suburb_areas[name] = multipolygon
 
-    return postal_areas, level8_areas, level7_areas, level6_areas, municipality_refs, borough_areas, suburb_areas
+    return postal_areas, municipality_areas, municipality_refs, borough_areas, suburb_areas
 
 
 class AreaIndex:
@@ -182,43 +162,28 @@ class AreaIndex:
         except TypeError:
             candidates = self.tree.query(point)
 
-        best_match = None
-        min_area = float('inf')
-
         # candidates are indices into self.geometries
         for idx in candidates:
-            idx = int(idx)
-            if 0 <= idx < len(self.geometries):
-                geom = self.geometries[idx]
+            if isinstance(idx, int) and 0 <= idx < len(self.geometries):
                 # Double-check containment for query() without predicate
-                if geom.contains(point):
-                    area = geom.area
-                    if area < min_area:
-                        min_area = area
-                        best_match = self.keys[idx]
+                if self.geometries[idx].contains(point):
+                    return self.keys[idx]
         
-        return best_match
+        return None
 
-    def nearest(self, point: Point) -> Tuple[Optional[str], float]:
+    def nearest(self, point: Point) -> Optional[str]:
         if not self.tree:
-            return None, float('inf')
+            return None
 
         try:
             idx = self.tree.nearest(point)
         except (TypeError, AttributeError):
-            return None, float('inf')
-        
-        if idx is None:
-            return None, float('inf')
+            return None
 
-        idx = int(idx)
-        if 0 <= idx < len(self.keys):
-            # Calculate actual distance
-            geom = self.geometries[idx]
-            dist = geom.distance(point)
-            return self.keys[idx], dist
+        if isinstance(idx, int) and 0 <= idx < len(self.keys):
+            return self.keys[idx]
         
-        return None, float('inf')
+        return None
 
 
 class AreaLookup:
@@ -227,80 +192,49 @@ class AreaLookup:
     def __init__(
         self,
         postal_areas: Dict[str, MultiPolygon],
-        level8_areas: Dict[str, MultiPolygon],
-        level7_areas: Dict[str, MultiPolygon],
-        level6_areas: Dict[str, MultiPolygon],
+        municipality_areas: Dict[str, MultiPolygon],
         municipality_refs: Dict[str, str],
         borough_areas: Dict[str, MultiPolygon],
         suburb_areas: Dict[str, MultiPolygon],
     ) -> None:
         self.postal_index = AreaIndex(postal_areas)
-        self.level8_index = AreaIndex(level8_areas)
-        self.level7_index = AreaIndex(level7_areas)
-        self.level6_index = AreaIndex(level6_areas)
+        self.municipality_index = AreaIndex(municipality_areas)
         self.borough_index = AreaIndex(borough_areas)
         self.suburb_index = AreaIndex(suburb_areas)
         self.municipality_refs = municipality_refs
-        
-        # Map children to Level 8 (municipality)
-        self._borough_to_municipality = self._map_children_to_parent(borough_areas, self.level8_index)
-        self._suburb_to_municipality = self._map_children_to_parent(suburb_areas, self.level8_index)
+        self._borough_to_municipality = self._map_children_to_municipality(borough_areas)
+        self._suburb_to_municipality = self._map_children_to_municipality(suburb_areas)
 
-    def lookup(self, point: Point) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    def lookup(self, point: Point) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
         postal = self.postal_index.find(point)
-        if not postal:
-            postal, _ = self.postal_index.nearest(point)
-
-        level8 = self.level8_index.find(point)
-        level7 = self.level7_index.find(point)
-        level6 = self.level6_index.find(point)
+        municipality = self.municipality_index.find(point)
         borough = self.borough_index.find(point)
         suburb = self.suburb_index.find(point)
 
         # Try to find municipality from children if direct lookup fails
-        if not level8 and borough:
-            level8 = self._borough_to_municipality.get(borough)
-        if not level8 and suburb:
-            level8 = self._suburb_to_municipality.get(suburb)
+        if not municipality and borough:
+            municipality = self._borough_to_municipality.get(borough)
+        if not municipality and suburb:
+            municipality = self._suburb_to_municipality.get(suburb)
         
         # Last resort: use nearest municipality (with reasonable distance limit)
-        # Only if we haven't found a higher-level city (level 6 or 7)
-        if not level8 and not level6 and not level7:
-            # Find nearest candidates from all relevant levels
-            l8_name, l8_dist = self.level8_index.nearest(point)
-            l6_name, l6_dist = self.level6_index.nearest(point)
-            l7_name, l7_dist = self.level7_index.nearest(point)
-            
-            # Find the absolute closest match
-            candidates = []
-            if l8_name: candidates.append((l8_dist, l8_name, '8'))
-            if l6_name: candidates.append((l6_dist, l6_name, '6'))
-            if l7_name: candidates.append((l7_dist, l7_name, '7'))
-            
-            if candidates:
-                candidates.sort(key=lambda x: x[0])
-                best_dist, best_name, best_level = candidates[0]
-                
-                if best_level == '8':
-                    level8 = best_name
-                elif best_level == '6':
-                    level6 = best_name
-                elif best_level == '7':
-                    level7 = best_name
+        # This helps for addresses near borders or slightly outside polygons
+        if not municipality:
+            municipality = self.municipality_index.nearest(point)
 
-        regional_key = self.municipality_refs.get(level8) if level8 else None
-        return postal, level8, level7, level6, borough, suburb, regional_key
+        regional_key = self.municipality_refs.get(municipality) if municipality else None
+        return postal, municipality, borough, suburb, regional_key
 
-    def _map_children_to_parent(self, areas: Dict[str, MultiPolygon], parent_index: AreaIndex) -> Dict[str, str]:
+    def _map_children_to_municipality(self, areas: Dict[str, MultiPolygon]) -> Dict[str, str]:
         mapping: Dict[str, str] = {}
         for name, geom in areas.items():
             try:
                 representative = geom.representative_point()
             except Exception:
                 continue
-            parent = parent_index.find(representative)
+            parent = self.municipality_index.find(representative)
             if not parent:
-                parent, _ = parent_index.nearest(representative)
+                parent = self.municipality_index.nearest(representative)
             if parent:
                 mapping[name] = parent
         return mapping
@@ -309,89 +243,32 @@ class AreaLookup:
 class StreetCache:
     """Lazy street ID cache to avoid repeated SELECTs."""
 
-    def __init__(self, session, max_size=100000) -> None:
+    def __init__(self, session) -> None:
         self.session = session
-        # Cache maps (name, city) -> List[Tuple[id, postal_code]]
-        self._cache: OrderedDict[Tuple[str, str], List[Tuple[int, Optional[str]]]] = OrderedDict()
-        self.max_size = max_size
+        self._cache: Dict[Tuple[str, str], int] = {}
 
-    def update_from_rows(self, rows: Iterable[Tuple[int, str, str, Optional[str]]]) -> None:
-        for street_id, name, city, postal_code in rows:
-            key = (name, city)
-            if key in self._cache:
-                self._cache.move_to_end(key)
-            
-            entries = self._cache.get(key, [])
-            # Avoid duplicates
-            if not any(x[0] == street_id for x in entries):
-                entries.append((street_id, postal_code))
-                self._cache[key] = entries
-            
-            if len(self._cache) > self.max_size:
-                self._cache.popitem(last=False)
+    def update_from_rows(self, rows: Iterable[Tuple[int, str, str]]) -> None:
+        for street_id, name, city in rows:
+            self._cache[(name, city)] = street_id
 
-    def get(self, name: str, city: str, postal_code: Optional[str] = None) -> Optional[int]:
+    def get(self, name: str, city: str) -> Optional[int]:
         key = (name, city)
-        
-        # Helper to find match in a list of (id, pcode) tuples
-        def find_match(entries):
-            # 1. Try exact postal code match
-            for sid, pcode in entries:
-                if pcode == postal_code:
-                    return sid
-            
-            # 2. Try to find an entry with None or empty postal code (to be updated later)
-            for sid, pcode in entries:
-                if not pcode:
-                    return sid
-            
-            # 3. If we have a postal code, but only found streets with DIFFERENT postal codes,
-            # we strictly shouldn't match. But if we didn't provide a postal code (postal_code is None),
-            # we can return any.
-            if not postal_code and entries:
-                return entries[0][0]
-                
-            return None
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
 
-        # Check memory cache first
-        if key in self._cache:
-            self._cache.move_to_end(key)
-            match = find_match(self._cache[key])
-            if match is not None:
-                return match
-
-        # Not in cache, query DB
-        # We fetch ALL streets with this name/city to populate cache fully
-        stmt = select(Street.id, Street.postal_code).where(Street.name == name, Street.city == city)
-        rows = self.session.execute(stmt).all()
-        
-        if not rows:
-            return None
-            
-        # Populate cache
-        entries = []
-        for row in rows:
-            entries.append((row.id, row.postal_code))
-        self._cache[key] = entries
-        
-        # Enforce size limit after adding new entry
-        if len(self._cache) > self.max_size:
-            self._cache.popitem(last=False)
-        
-        return find_match(entries)
-
-
-# Module logger
-logger = logging.getLogger(__name__)
+        stmt = select(Street.id).where(Street.name == name, Street.city == city)
+        street_id = self.session.execute(stmt).scalar()
+        if street_id is not None:
+            self._cache[key] = street_id
+        return street_id
 
 
 class StreetStreamingHandler(SimpleHandler):
     """Stream street geometries directly into the database."""
 
     _ALLOWED_HIGHWAYS = {
-        'motorway', 'motorway_link', 'trunk', 'trunk_link',
-        'primary', 'primary_link', 'secondary', 'secondary_link',
-        'tertiary', 'tertiary_link', 'residential', 'living_street',
+        'primary', 'secondary', 'tertiary', 'residential', 'living_street',
         'road', 'unclassified', 'footway', 'pedestrian', 'track', 'service',
     }
 
@@ -400,191 +277,89 @@ class StreetStreamingHandler(SimpleHandler):
         self.areas = areas
         self.session = session
         self.cache = cache
-        self.batch_size = batch_size  # Keep for compatibility but won't be used
+        self.batch_size = batch_size
         self._factory = WKBFactory()
+        self._pending: List[Dict[str, object]] = []
         self.processed = 0
         self.persisted = 0
-        self.segments_persisted = 0
         self.skipped_missing_city = 0
         self._last_report = 0
 
     def way(self, way):  # type: ignore[override]
         tags = way.tags
         if not self._is_valid_street(tags):
-            # logger.debug("Skipping way %s: not a valid street (filtered by tags)", getattr(way, 'id', None))
             return
 
         name = tags.get('name')
         if not name:
-            # logger.debug("Skipping way %s: missing name tag", getattr(way, 'id', None))
             return
 
         try:
             geom_wkb = self._factory.create_linestring(way)
             line = wkb.loads(geom_wkb)
         except Exception:
-            logger.debug("Failed to create linestring for way %s", getattr(way, 'id', None), exc_info=True)
             return
 
         if line.is_empty or not line.is_valid or line.geom_type != 'LineString':
-            # logger.debug("Skipping way %s: invalid or empty geometry; type=%s", getattr(way, 'id', None), getattr(line, 'geom_type', None))
             return
 
-        # Extract segments first
-        segments = self._extract_segments(line)
-        if not segments:
-            return
+        centroid = line.centroid
+        point = Point(centroid.x, centroid.y)
+        postal, municipality, borough, suburb, regional_key = self.areas.lookup(point)
 
-        # Group segments by (city, postal_code)
-        # We iterate over segments and find the PLZ for each segment's midpoint
-        grouped_segments = {} # Key: (city, postal_code, regional_key, borough, suburb) -> List[segment]
-
-        for seg in segments:
-            mid_lat = (seg['start_lat'] + seg['end_lat']) / 2
-            mid_lon = (seg['start_lon'] + seg['end_lon']) / 2
-            point = Point(mid_lon, mid_lat)
-            
-            match = self.areas.lookup(point)
-            postal, level8, level7, level6, borough, suburb, regional_key = match
-            
-            # Fallback to tags if spatial lookup fails for postal code
-            if not postal:
-                postal = tags.get('postal_code') or tags.get('addr:postcode')
-            
-            # Ensure postal is not None for grouping and DB uniqueness
-            if postal is None:
-                postal = ""
-            
-            # Determine city
-            # Prioritize level 8 (municipality), but if missing, check level 6 (independent city) or 7
-            city = level8
-            if not city:
-                city = level6 or level7
-            
-            if not city:
-                city = self._infer_city_from_tags(tags)
-            
-            if not city:
-                city = borough or suburb
-            
-            if city:
-                city = city.strip()
-            
-            if not city:
-                # If we can't determine city for this segment, we skip it
-                continue
-                
-            key = (city, postal, regional_key, borough, suburb)
-            if key not in grouped_segments:
-                grouped_segments[key] = []
-            grouped_segments[key].append(seg)
-
-        if not grouped_segments:
+        # Try to get city: first from spatial lookup, then tags, with fallback to borough/suburb
+        city = municipality or self._infer_city_from_tags(tags) or borough or suburb
+        if city:
+            city = city.strip()
+        if not city:
             self.skipped_missing_city += 1
             return
 
-        # Process each group
-        for (city, postal, regional_key, borough, suburb), batch in grouped_segments.items():
-            # Calculate centroid for this group of segments
-            avg_lat = sum((s['start_lat'] + s['end_lat']) / 2 for s in batch) / len(batch)
-            avg_lon = sum((s['start_lon'] + s['end_lon']) / 2 for s in batch) / len(batch)
-            
-            payload = {
-                'name': name,
-                'city': city,
-                'postal_code': postal,
-                'regional_key': regional_key,
-                'borough': borough,
-                'suburb': suburb,
-                'latitude': avg_lat,
-                'longitude': avg_lon,
-            }
+        payload = {
+            'name': name,
+            'city': city,
+            'postal_code': postal,
+            'regional_key': regional_key,
+            'borough': borough,
+            'suburb': suburb,
+            'latitude': float(centroid.y),
+            'longitude': float(centroid.x),
+        }
 
-            # Upsert Street
-            stmt = sqlite_insert(Street).values([payload])
-            stmt = stmt.on_conflict_do_update(
-                index_elements=['name', 'postal_code', 'city'],
-                set_={
-                    'regional_key': stmt.excluded.regional_key,
-                    'borough': stmt.excluded.borough,
-                    'suburb': stmt.excluded.suburb,
-                    'latitude': stmt.excluded.latitude,
-                    'longitude': stmt.excluded.longitude,
-                },
-            ).returning(Street.id, Street.name, Street.city, Street.postal_code)
-
-            try:
-                result = self.session.execute(stmt)
-                row = result.fetchone()
-                
-                if row:
-                    self.cache.update_from_rows([(row.id, row.name, row.city, row.postal_code)])
-                    self.persisted += 1
-                    
-                    # Insert segments
-                    segment_values = []
-                    for seg in batch:
-                        seg['street_id'] = row.id
-                        segment_values.append(seg)
-                    
-                    # Batch insert segments
-                    SEGMENT_BATCH_SIZE = 1000
-                    for i in range(0, len(segment_values), SEGMENT_BATCH_SIZE):
-                        sub_batch = segment_values[i:i + SEGMENT_BATCH_SIZE]
-                        seg_stmt = sqlite_insert(StreetSegment).values(sub_batch)
-                        seg_stmt = seg_stmt.on_conflict_do_nothing()
-                        try:
-                            seg_result = self.session.execute(seg_stmt)
-                            if seg_result.rowcount:
-                                self.segments_persisted += seg_result.rowcount
-                        except Exception:
-                            logger.exception("Failed to insert segment batch")
-            except Exception:
-                logger.exception("Upsert for street '%s' failed", name)
-
+        self._pending.append(payload)
         self.processed += 1
+
+        # Progress report every 10000 streets
         if self.processed - self._last_report >= 10000:
-            self.session.commit()
-            logger.info(
-                "  Streets: %d processed, %d persisted (entries), %d segments, %d skipped",
-                self.processed,
-                self.persisted,
-                self.segments_persisted,
-                self.skipped_missing_city,
-            )
+            print(f"  Streets: {self.processed} processed, {self.persisted} with city, {self.skipped_missing_city} skipped (no city)")
             self._last_report = self.processed
 
-    def _extract_segments(self, line) -> List[Dict[str, object]]:
-        """Extract line segments from a LineString geometry."""
-        segments = []
-        coords = list(line.coords)
-        
-        for i in range(len(coords) - 1):
-            start_lon, start_lat = coords[i]
-            end_lon, end_lat = coords[i + 1]
-            
-            # Calculate bounding box for this segment
-            min_lat = min(start_lat, end_lat)
-            max_lat = max(start_lat, end_lat)
-            min_lon = min(start_lon, end_lon)
-            max_lon = max(start_lon, end_lon)
-            
-            segments.append({
-                'start_lat': float(start_lat),
-                'start_lon': float(start_lon),
-                'end_lat': float(end_lat),
-                'end_lon': float(end_lon),
-                'min_lat': float(min_lat),
-                'max_lat': float(max_lat),
-                'min_lon': float(min_lon),
-                'max_lon': float(max_lon),
-            })
-        
-        return segments
+        if len(self._pending) >= self.batch_size:
+            self.flush()
 
     def flush(self) -> None:
-        """No-op since we insert immediately now."""
-        pass
+        if not self._pending:
+            return
+
+        stmt = sqlite_insert(Street).values(self._pending)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=['name', 'city'],
+            set_={
+                'postal_code': stmt.excluded.postal_code,
+                'regional_key': stmt.excluded.regional_key,
+                'borough': stmt.excluded.borough,
+                'suburb': stmt.excluded.suburb,
+                'latitude': stmt.excluded.latitude,
+                'longitude': stmt.excluded.longitude,
+            },
+        ).returning(Street.id, Street.name, Street.city)
+
+        result = self.session.execute(stmt)
+        rows = [(row.id, row.name, row.city) for row in result]
+        self.cache.update_from_rows(rows)
+        self.session.flush()
+        self.persisted += len(rows)
+        self._pending.clear()
 
     def _is_valid_street(self, tags) -> bool:
         highway = tags.get('highway')
@@ -644,12 +419,13 @@ class StreetStreamingHandler(SimpleHandler):
 class AddressStreamingHandler(SimpleHandler):
     """Stream address nodes, ways, and relations directly into the database."""
 
-    def __init__(self, session, cache: StreetCache, areas: AreaLookup, batch_size: int = 2000) -> None:
+    def __init__(self, session, cache: StreetCache, areas: AreaLookup, batch_size: int = 10000) -> None:
         super().__init__()
         self.session = session
         self.cache = cache
         self.areas = areas
         self.batch_size = batch_size
+        self._pending: List[Dict[str, object]] = []
         self._factory = WKBFactory()
         self.processed = 0
         self.inserted = 0
@@ -659,15 +435,12 @@ class AddressStreamingHandler(SimpleHandler):
         self.skipped_no_street = 0
         self.skipped_no_city = 0
         self._last_report = 0
-        self.updated_streets = set()
-        self.address_buffer = []
 
     def _extract_address(self, tags, lat: float, lon: float) -> None:
         """Common address extraction logic for nodes, ways, and relations."""
         # Fast early exit before dict lookups
         if 'addr:housenumber' not in tags or 'addr:street' not in tags:
             self.skipped_no_street += 1
-            logger.debug("Skipping address: missing addr:housenumber or addr:street tags: %s", {t.k: t.v for t in tags})
             return
         
         house_number = tags['addr:housenumber']
@@ -680,90 +453,33 @@ class AddressStreamingHandler(SimpleHandler):
                 tags.get('addr:municipality') or
                 tags.get('addr:hamlet'))
         
-        postal_code = tags.get('addr:postcode')
-        
-        # Only do expensive spatial lookup if no city tag exists or postal code is missing
-        if not city or not postal_code:
+        # Only do expensive spatial lookup if no city tag exists
+        if not city:
             point = Point(lon, lat)
-            lookup_postal, level8, level7, level6, borough, suburb, _ = self.areas.lookup(point)
-            # Use municipality (Level 8), or fallback to others
-            if not city:
-                city = level8 or level6 or level7 or borough or suburb
-            
-            if not postal_code:
-                postal_code = lookup_postal
+            _, municipality, borough, suburb, _ = self.areas.lookup(point)
+            # Use municipality, or fallback to borough/suburb if that's all we have
+            city = municipality or borough or suburb
         
         if not city:
             self.skipped_no_city += 1
-            logger.debug("Skipping address for street '%s' house '%s': could not determine city", street_name, house_number)
             return
 
-        street_id = self.cache.get(street_name, city, postal_code)
+        street_id = self.cache.get(street_name, city)
         if street_id is None:
-            # If we failed to find a street with the specific postal code, 
-            # check if we can find ANY street with that name/city.
-            # If we find one, it means the street exists but with a different (or missing) postal code.
-            # In that case, we should create a NEW street entry for this specific postal code.
-            any_street_id = self.cache.get(street_name, city, None)
-            
-            if any_street_id and postal_code:
-                logger.debug("Street '%s' in '%s' exists but not for PLZ %s. Creating new street entry.", street_name, city, postal_code)
-                street_id = self._create_street_for_postal_code(any_street_id, postal_code, lat, lon)
+            return
 
-            if street_id is None:
-                if any_street_id:
-                    logger.debug("Address %s %s in %s (PLZ %s) skipped: Street exists but could not create/find match", street_name, house_number, city, postal_code)
-                else:
-                    logger.debug("Address references unknown street name='%s' city='%s' — skipping", street_name, city)
-                return
-
-        # Backfill missing postal code on the street if we have one
-        if postal_code and street_id not in self.updated_streets:
-            try:
-                stmt = update(Street).where(
-                    Street.id == street_id,
-                    or_(Street.postal_code.is_(None), Street.postal_code == "")
-                ).values(postal_code=postal_code)
-                result = self.session.execute(stmt)
-                if result.rowcount > 0:
-                    logger.debug("Backfilled postal code %s for street '%s' (id=%s)", postal_code, street_name, street_id)
-                self.updated_streets.add(street_id)
-            except Exception:
-                # If update fails (likely unique constraint), it means the street with this PLZ already exists.
-                # We should try to find it and switch street_id to it.
-                # logger.warning("Failed to update postal code for street %s. Trying to find existing match.", street_id)
-                
-                try:
-                    lookup_stmt = select(Street.id).where(
-                        Street.name == street_name,
-                        Street.city == city,
-                        Street.postal_code == postal_code
-                    )
-                    existing_id = self.session.execute(lookup_stmt).scalar()
-                    if existing_id:
-                        street_id = existing_id
-                        # Update cache to avoid future errors for this street
-                        self.cache.update_from_rows([(existing_id, street_name, city, postal_code)])
-                        logger.debug("Switched to existing street %s for address", street_id)
-                except Exception:
-                    pass
-
-        payload = {
-            'street_id': street_id,
-            'house_number': house_number,
-            'latitude': float(lat),
-            'longitude': float(lon),
-        }
-        
-        self.address_buffer.append(payload)
-        if len(self.address_buffer) >= self.batch_size:
-            self._flush_buffer()
-        
+        self._pending.append(
+            {
+                'street_id': street_id,
+                'house_number': house_number,
+                'latitude': float(lat),
+                'longitude': float(lon),
+            }
+        )
         self.processed += 1
 
         # Progress report every 10000 addresses
         if self.processed - self._last_report >= 10000:
-            self.session.commit()
             print(
                 f"  Addresses: {self.processed} total ({self.processed_nodes} nodes, "
                 f"{self.processed_ways} ways, {self.processed_relations} relations), "
@@ -771,20 +487,8 @@ class AddressStreamingHandler(SimpleHandler):
             )
             self._last_report = self.processed
 
-    def _flush_buffer(self) -> None:
-        if not self.address_buffer:
-            return
-            
-        stmt = sqlite_insert(Address).values(self.address_buffer)
-        stmt = stmt.on_conflict_do_nothing(index_elements=['street_id', 'house_number'])
-        try:
-            result = self.session.execute(stmt)
-            if result.rowcount and result.rowcount > 0:
-                self.inserted += result.rowcount
-        except Exception:
-            logger.exception("Failed to insert address batch")
-            
-        self.address_buffer = []
+        if len(self._pending) >= self.batch_size:
+            self.flush()
 
     def node(self, node):  # type: ignore[override]
         # Ultra-fast pre-filter: skip 99% of nodes immediately
@@ -849,126 +553,69 @@ class AddressStreamingHandler(SimpleHandler):
             return
 
     def flush(self) -> None:
-        """Flush remaining items in buffer."""
-        self._flush_buffer()
+        if not self._pending:
+            return
+
+        stmt = sqlite_insert(Address).values(self._pending)
+        stmt = stmt.on_conflict_do_nothing(index_elements=['street_id', 'house_number'])
+        result = self.session.execute(stmt)
+        self.session.flush()
+        if result.rowcount and result.rowcount > 0:
+            self.inserted += result.rowcount
+        self._pending.clear()
 
     def finish(self) -> None:
-        """Print summary."""
+        """Flush remaining batch and print summary."""
         self.flush()
-        logger.info(
-            "\n=== Address Import Summary ===\n  Nodes processed: %d\n  Ways processed: %d\n  Relations processed: %d\n  Total addresses: %d\n  Inserted: %d\n  Skipped (no street): %d\n  Skipped (no city): %d",
-            self.processed_nodes,
-            self.processed_ways,
-            self.processed_relations,
-            self.processed,
-            self.inserted,
-            self.skipped_no_street,
-            self.skipped_no_city,
+        print(
+            f"\n=== Address Import Summary ==="
+            f"\n  Nodes processed: {self.processed_nodes:,}"
+            f"\n  Ways processed: {self.processed_ways:,}"
+            f"\n  Relations processed: {self.processed_relations:,}"
+            f"\n  Total addresses: {self.processed:,}"
+            f"\n  Inserted: {self.inserted:,}"
+            f"\n  Skipped (no street): {self.skipped_no_street:,}"
+            f"\n  Skipped (no city): {self.skipped_no_city:,}"
         )
-
-    def _create_street_for_postal_code(self, ref_street_id: int, postal_code: str, lat: float, lon: float) -> Optional[int]:
-        """Create a new street entry for a specific postal code, copying details from an existing street."""
-        try:
-            # Fetch reference street to copy auxiliary fields
-            stmt = select(Street).where(Street.id == ref_street_id)
-            ref_street = self.session.execute(stmt).scalar_one_or_none()
-            if not ref_street:
-                return None
-                
-            new_street = {
-                'name': ref_street.name,
-                'city': ref_street.city,
-                'postal_code': postal_code,
-                'regional_key': ref_street.regional_key,
-                'borough': ref_street.borough,
-                'suburb': ref_street.suburb,
-                'latitude': lat, # Use address location as anchor for this PLZ segment
-                'longitude': lon
-            }
-            
-            # Insert new street
-            stmt = sqlite_insert(Street).values([new_street])
-            # If it already exists (race condition), do nothing
-            stmt = stmt.on_conflict_do_nothing(index_elements=['name', 'postal_code', 'city'])
-            
-            result = self.session.execute(stmt)
-            
-            # If we inserted a new row, we can't easily get the ID with returning() if on_conflict_do_nothing triggered
-            # So we might need to query it back if rowcount is 0
-            
-            if result.rowcount > 0:
-                # We need to fetch the ID. SQLite returning works with insert.
-                # But SQLAlchemy's returning() with on_conflict_do_nothing might be tricky in some versions.
-                # Let's try to query it back to be safe and simple.
-                pass
-            
-            # Query back the ID (safest approach for all drivers/versions)
-            # We need the ID whether we just inserted it or it already existed
-            lookup_stmt = select(Street.id).where(
-                Street.name == ref_street.name,
-                Street.city == ref_street.city,
-                Street.postal_code == postal_code
-            )
-            new_id = self.session.execute(lookup_stmt).scalar()
-            
-            if new_id:
-                self.cache.update_from_rows([(new_id, ref_street.name, ref_street.city, postal_code)])
-                logger.debug("Created/Found split street '%s' for PLZ %s (id=%s)", ref_street.name, postal_code, new_id)
-                return new_id
-                
-        except Exception:
-            logger.exception("Failed to create split street for PLZ %s", postal_code)
-            
-        return None
 
 
 def main() -> None:
     pbf_file = 'germany-latest.osm.pbf'
     if not os.path.exists(pbf_file):
-        logger.error("PBF file %s not found. Please download germany-latest.osm.pbf from Geofabrik.", pbf_file)
+        print(f"PBF file {pbf_file} not found. Please download germany-latest.osm.pbf from Geofabrik.")
         return
 
     init_db()
 
-    logger.info('Scanning boundary relations...')
+    print('Scanning boundary relations...')
     relation_collector = BoundaryRelationCollector()
     relation_collector.apply_file(pbf_file)
-    logger.info(
-        "Collected %d relevant relations (requires %d ways)",
-        len(relation_collector.relations),
-        len(relation_collector.required_way_ids),
+    print(
+        f"Collected {len(relation_collector.relations)} relevant relations "
+        f"(requires {len(relation_collector.required_way_ids)} ways)"
     )
 
-    logger.info('Collecting boundary way geometries...')
+    print('Collecting boundary way geometries...')
     way_collector = FilteredWayCollector(relation_collector.required_way_ids)
     way_collector.apply_file(pbf_file, locations=True, idx='flex_mem')
-    logger.info("Loaded %d boundary way geometries", len(way_collector.ways))
+    print(f"Loaded {len(way_collector.ways)} boundary way geometries")
 
     (
         postal_areas,
-        level8_areas,
-        level7_areas,
-        level6_areas,
+        municipality_areas,
         municipality_refs,
         borough_areas,
         suburb_areas,
     ) = _build_geometries(relation_collector.relations, way_collector.ways)
 
-    logger.info(
-        "Areas -> postal: %d, L8: %d, L7: %d, L6: %d, boroughs: %d, suburbs: %d",
-        len(postal_areas),
-        len(level8_areas),
-        len(level7_areas),
-        len(level6_areas),
-        len(borough_areas),
-        len(suburb_areas),
+    print(
+        f"Areas -> postal: {len(postal_areas)}, municipalities: {len(municipality_areas)}, "
+        f"boroughs: {len(borough_areas)}, suburbs: {len(suburb_areas)}"
     )
 
     area_lookup = AreaLookup(
         postal_areas,
-        level8_areas,
-        level7_areas,
-        level6_areas,
+        municipality_areas,
         municipality_refs,
         borough_areas,
         suburb_areas,
@@ -978,70 +625,36 @@ def main() -> None:
     del relation_collector
     gc.collect()
 
-    with database.SessionLocal() as session:
-        # Optimize SQLite for bulk insert
-        session.execute(text("PRAGMA synchronous = OFF"))
-        session.execute(text("PRAGMA journal_mode = MEMORY"))
-        session.execute(text("PRAGMA cache_size = 100000"))
-
+    with SessionLocal() as session:
         street_cache = StreetCache(session)
 
-        logger.info('Processing street geometries...')
+        print('Processing street geometries...')
         street_handler = StreetStreamingHandler(area_lookup, session, street_cache, batch_size=5000)
         street_handler.apply_file(pbf_file, locations=True)
         street_handler.flush()
         session.commit()
-        logger.info(
-            "Processed %d street ways (persisted %d, skipped missing city %d)",
-            street_handler.processed,
-            street_handler.persisted,
-            street_handler.skipped_missing_city,
+        print(
+            f"Processed {street_handler.processed} street ways (persisted {street_handler.persisted}, "
+            f"skipped missing city {street_handler.skipped_missing_city})"
         )
 
-        logger.info('Processing address nodes...')
+        print('Processing address nodes...')
         address_handler = AddressStreamingHandler(session, street_cache, area_lookup, batch_size=5000)
         address_handler.apply_file(pbf_file, locations=True)
         address_handler.finish()
         session.commit()
 
-        # Optimize database statistics for query planner
-        logger.info("Running ANALYZE to optimize query planner statistics...")
-        session.execute(text("ANALYZE"))
-        session.commit()
-
-    logger.info('Import completed.')
+    print('Import completed.')
     
     # Rebuild fuzzy search index after import
-
+    print()
+    print('Rebuilding fuzzy search index...')
+    try:
+        from database import rebuild_fuzzy_index
+        rebuild_fuzzy_index(verbose=True)
+    except Exception as e:
+        print(f'Warning: Could not rebuild fuzzy index: {e}')
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Import OSM PBF into sqlite DB')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Enable INFO logging')
-    parser.add_argument('-d', '--debug', action='store_true', help='Enable DEBUG logging')
-    parser.add_argument('--db-file', help='Path to output database file (default: ./autocomplete.db)')
-    parser.add_argument('--reset', action='store_true', help='Drop and recreate tables before import')
-    args = parser.parse_args()
-
-    # Configure logging
-    if args.debug:
-        level = logging.DEBUG
-    elif args.verbose:
-        level = logging.INFO
-    else:
-        level = logging.INFO
-
-    logging.basicConfig(level=level, format='%(asctime)s %(levelname)s: %(message)s')
-
-    if args.db_file:
-        logger.info("Using database file: %s", args.db_file)
-        configure_db(args.db_file)
-
-    if args.reset:
-        logger.info("Resetting database...")
-        import models
-        from database import engine
-        models.Base.metadata.drop_all(bind=engine)
-        logger.info("Database tables dropped.")
-
     main()
