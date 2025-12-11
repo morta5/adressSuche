@@ -102,6 +102,7 @@ def _build_geometries(relations: Sequence[Dict[str, object]], ways: Dict[int, ob
     Dict[str, MultiPolygon],
     Dict[str, MultiPolygon],
     Dict[str, MultiPolygon],
+    Dict[str, MultiPolygon],
     Dict[str, str],
     Dict[str, MultiPolygon],
     Dict[str, MultiPolygon],
@@ -112,6 +113,7 @@ def _build_geometries(relations: Sequence[Dict[str, object]], ways: Dict[int, ob
     level8_areas: Dict[str, MultiPolygon] = {}
     level7_areas: Dict[str, MultiPolygon] = {}
     level6_areas: Dict[str, MultiPolygon] = {}
+    level5_areas: Dict[str, MultiPolygon] = {}
     municipality_refs: Dict[str, str] = {}
     borough_areas: Dict[str, MultiPolygon] = {}
     suburb_areas: Dict[str, MultiPolygon] = {}
@@ -155,13 +157,16 @@ def _build_geometries(relations: Sequence[Dict[str, object]], ways: Dict[int, ob
                 level7_areas[name] = multipolygon
             elif admin_level == '6':
                 level6_areas[name] = multipolygon
-                logger.info("Built geometry for Level 6 city: %s", name)
+                logger.info("Built geometry for Level 6 area: %s", name)
+            elif admin_level == '5':
+                level5_areas[name] = multipolygon
+                logger.info("Built geometry for Level 5 area: %s", name)
             elif admin_level == '9':
                 borough_areas[name] = multipolygon
             elif admin_level == '10':
                 suburb_areas[name] = multipolygon
 
-    return postal_areas, level8_areas, level7_areas, level6_areas, municipality_refs, borough_areas, suburb_areas
+    return postal_areas, level8_areas, level7_areas, level6_areas, level5_areas, municipality_refs, borough_areas, suburb_areas
 
 
 class AreaIndex:
@@ -230,6 +235,7 @@ class AreaLookup:
         level8_areas: Dict[str, MultiPolygon],
         level7_areas: Dict[str, MultiPolygon],
         level6_areas: Dict[str, MultiPolygon],
+        level5_areas: Dict[str, MultiPolygon],
         municipality_refs: Dict[str, str],
         borough_areas: Dict[str, MultiPolygon],
         suburb_areas: Dict[str, MultiPolygon],
@@ -238,6 +244,7 @@ class AreaLookup:
         self.level8_index = AreaIndex(level8_areas)
         self.level7_index = AreaIndex(level7_areas)
         self.level6_index = AreaIndex(level6_areas)
+        self.level5_index = AreaIndex(level5_areas)
         self.borough_index = AreaIndex(borough_areas)
         self.suburb_index = AreaIndex(suburb_areas)
         self.municipality_refs = municipality_refs
@@ -246,7 +253,7 @@ class AreaLookup:
         self._borough_to_municipality = self._map_children_to_parent(borough_areas, self.level8_index)
         self._suburb_to_municipality = self._map_children_to_parent(suburb_areas, self.level8_index)
 
-    def lookup(self, point: Point) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    def lookup(self, point: Point) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
         postal = self.postal_index.find(point)
         if not postal:
             postal, _ = self.postal_index.nearest(point)
@@ -254,6 +261,7 @@ class AreaLookup:
         level8 = self.level8_index.find(point)
         level7 = self.level7_index.find(point)
         level6 = self.level6_index.find(point)
+        level5 = self.level5_index.find(point)
         borough = self.borough_index.find(point)
         suburb = self.suburb_index.find(point)
 
@@ -264,17 +272,19 @@ class AreaLookup:
             level8 = self._suburb_to_municipality.get(suburb)
         
         # Last resort: use nearest municipality (with reasonable distance limit)
-        # Only if we haven't found a higher-level city (level 6 or 7)
-        if not level8 and not level6 and not level7:
+        # Only if we haven't found a higher-level city (level 5, 6 or 7)
+        if not level8 and not level6 and not level7 and not level5:
             # Find nearest candidates from all relevant levels
             l8_name, l8_dist = self.level8_index.nearest(point)
             l6_name, l6_dist = self.level6_index.nearest(point)
+            l5_name, l5_dist = self.level5_index.nearest(point)
             l7_name, l7_dist = self.level7_index.nearest(point)
             
             # Find the absolute closest match
             candidates = []
             if l8_name: candidates.append((l8_dist, l8_name, '8'))
             if l6_name: candidates.append((l6_dist, l6_name, '6'))
+            if l5_name: candidates.append((l5_dist, l5_name, '5'))
             if l7_name: candidates.append((l7_dist, l7_name, '7'))
             
             if candidates:
@@ -285,11 +295,13 @@ class AreaLookup:
                     level8 = best_name
                 elif best_level == '6':
                     level6 = best_name
+                elif best_level == '5':
+                    level5 = best_name
                 elif best_level == '7':
                     level7 = best_name
 
         regional_key = self.municipality_refs.get(level8) if level8 else None
-        return postal, level8, level7, level6, borough, suburb, regional_key
+        return postal, level8, level7, level6, level5, borough, suburb, regional_key
 
     def _map_children_to_parent(self, areas: Dict[str, MultiPolygon], parent_index: AreaIndex) -> Dict[str, str]:
         mapping: Dict[str, str] = {}
@@ -445,7 +457,7 @@ class StreetStreamingHandler(SimpleHandler):
             point = Point(mid_lon, mid_lat)
             
             match = self.areas.lookup(point)
-            postal, level8, level7, level6, borough, suburb, regional_key = match
+            postal, level8, level7, level6, level5, borough, suburb, regional_key = match
             
             # Fallback to tags if spatial lookup fails for postal code
             if not postal:
@@ -456,26 +468,29 @@ class StreetStreamingHandler(SimpleHandler):
                 postal = ""
             
             # Determine city
-            # Priority:
-            # 1. Level 6 (independent cities: Hamburg, Berlin, Bremen, etc.) - these are city-states
-            # 2. Level 8 (municipalities) - regular towns and cities
-            # 3. Tags (addr:city, etc.)
-            # 4. Level 7 (counties/Landkreise) - only as fallback
-            # 5. Borough/suburb - ONLY if no higher-level city found AND no tags
-            #    (borough/suburb should supplement, not replace the city)
+            # Priority (based on https://wiki.openstreetmap.org/wiki/DE:Grenze):
+            # 1. Level 8 (municipalities/Gemeinden) - most specific city/town name
+            # 2. Level 6 (counties/Kreise and independent cities/kreisfreie Städte)
+            # 3. Level 5 (administrative regions/Regierungsbezirke) - only in some states
+            # 4. Tags (addr:city, etc.)
+            # 5. Level 7 (associations of municipalities)
+            # 6. Borough/suburb - ONLY as last resort
             
             city = None
             
-            # First check Level 6 (independent city-states)
-            if level6:
-                city = level6
-            # Then Level 8 (municipalities)
-            elif level8:
+            # First check Level 8 (municipalities)
+            if level8:
                 city = level8
+            # Then Level 6 (counties/independent cities)
+            elif level6:
+                city = level6
+            # Then Level 5 (administrative regions)
+            elif level5:
+                city = level5
             # Try tags
             elif not city:
                 city = self._infer_city_from_tags(tags)
-            # Fallback to Level 7 (county)
+            # Fallback to Level 7 (associations)
             elif not city and level7:
                 city = level7
             # Last resort: use borough/suburb only if absolutely nothing else found
@@ -700,14 +715,16 @@ class AddressStreamingHandler(SimpleHandler):
         # Only do expensive spatial lookup if no city tag exists or postal code is missing
         if not city or not postal_code:
             point = Point(lon, lat)
-            lookup_postal, level8, level7, level6, borough, suburb, _ = self.areas.lookup(point)
-            # Use city priority: Level 6 (city-states) > Level 8 (municipalities) > Level 7 (counties)
-            # Borough/suburb should only be used as last resort
+            lookup_postal, level8, level7, level6, level5, borough, suburb, _ = self.areas.lookup(point)
+            # Use city priority (based on https://wiki.openstreetmap.org/wiki/DE:Grenze):
+            # Level 8 (municipalities) > Level 6 (counties/independent cities) > Level 5 (regions) > Level 7
             if not city:
-                if level6:
-                    city = level6
-                elif level8:
+                if level8:
                     city = level8
+                elif level6:
+                    city = level6
+                elif level5:
+                    city = level5
                 elif level7:
                     city = level7
                 else:
@@ -972,17 +989,19 @@ def main() -> None:
         level8_areas,
         level7_areas,
         level6_areas,
+        level5_areas,
         municipality_refs,
         borough_areas,
         suburb_areas,
     ) = _build_geometries(relation_collector.relations, way_collector.ways)
 
     logger.info(
-        "Areas -> postal: %d, L8: %d, L7: %d, L6: %d, boroughs: %d, suburbs: %d",
+        "Areas -> postal: %d, L8: %d, L7: %d, L6: %d, L5: %d, boroughs: %d, suburbs: %d",
         len(postal_areas),
         len(level8_areas),
         len(level7_areas),
         len(level6_areas),
+        len(level5_areas),
         len(borough_areas),
         len(suburb_areas),
     )
@@ -992,6 +1011,7 @@ def main() -> None:
         level8_areas,
         level7_areas,
         level6_areas,
+        level5_areas,
         municipality_refs,
         borough_areas,
         suburb_areas,
