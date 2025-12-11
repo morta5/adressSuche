@@ -4,10 +4,13 @@ import asyncio
 import logging
 import math
 import sqlite3
+from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -249,15 +252,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount static files from frontend directory
+frontend_path = Path(__file__).parent / "frontend"
+if frontend_path.exists():
+    app.mount("/static", StaticFiles(directory=str(frontend_path)), name="static")
+
 
 @app.on_event("startup")
 async def _on_startup():
     init_db()
 
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    return {"message": "Street Autocomplete API v2", "endpoint": "/autocomplete"}
+    """Serve the homepage."""
+    index_path = frontend_path / "index.html"
+    if index_path.exists():
+        return HTMLResponse(content=index_path.read_text(), status_code=200)
+    return {"message": "Street Autocomplete API v2", "docs": "/docs"}
 
 
 @app.get("/autocomplete", response_model=List[StreetAutocompleteResponse])

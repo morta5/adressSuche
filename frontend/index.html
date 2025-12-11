@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Free German address autocomplete API with fuzzy search, typo tolerance, and reverse geocoding. Open-source, high-performance address validation for developers.">
+    <meta name="keywords" content="address autocomplete, german addresses, geocoding api, reverse geocoding, address validation, open source, fastapi, typo tolerance, fuzzy search">
+    <meta name="author" content="adressSuche">
+    <meta property="og:title" content="Address Autocomplete API - German Address Search & Geocoding">
+    <meta property="og:description" content="Free, open-source German address autocomplete API with intelligent search, typo tolerance, and reverse geocoding.">
+    <meta property="og:type" content="website">
+    <title>Address Autocomplete API - German Address Search & Geocoding | Open Source</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary-color: #4CAF50;
+            --secondary-color: #2196F3;
+            --dark-bg: #1a1a1a;
+            --light-bg: #f5f5f5;
+            --text-dark: #333;
+            --text-light: #666;
+            --border-color: #ddd;
+            --shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.15);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-dark);
+            background: var(--light-bg);
+        }
+
+        /* Header / Hero Section */
+        .hero {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: white;
+            padding: 60px 20px;
+            text-align: center;
+        }
+
+        .hero h1 {
+            font-size: 2.5em;
+            margin-bottom: 20px;
+            font-weight: 700;
+        }
+
+        .hero p {
+            font-size: 1.2em;
+            max-width: 800px;
+            margin: 0 auto 30px;
+            opacity: 0.95;
+        }
+
+        .hero-buttons {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 12px 30px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            border: 2px solid transparent;
+        }
+
+        .btn-primary {
+            background: white;
+            color: var(--primary-color);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .btn-outline {
+            border-color: white;
+            color: white;
+            background: transparent;
+        }
+
+        .btn-outline:hover {
+            background: white;
+            color: var(--primary-color);
+        }
+
+        /* Container */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        /* Features Section */
+        .features {
+            padding: 60px 20px;
+            background: white;
+        }
+
+        .features h2 {
+            text-align: center;
+            font-size: 2em;
+            margin-bottom: 40px;
+            color: var(--text-dark);
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+
+        .feature-card {
+            padding: 30px;
+            background: var(--light-bg);
+            border-radius: 8px;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .feature-card h3 {
+            font-size: 1.3em;
+            margin-bottom: 15px;
+            color: var(--primary-color);
+        }
+
+        .feature-card p {
+            color: var(--text-light);
+            line-height: 1.8;
+        }
+
+        /* Demo Section */
+        .demo {
+            padding: 60px 20px;
+            background: var(--light-bg);
+        }
+
+        .demo h2 {
+            text-align: center;
+            font-size: 2em;
+            margin-bottom: 40px;
+        }
+
+        .demo-tabs {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+
+        .demo-tab {
+            padding: 12px 24px;
+            background: white;
+            border: 2px solid var(--border-color);
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .demo-tab:hover {
+            border-color: var(--primary-color);
+            color: var(--primary-color);
+        }
+
+        .demo-tab.active {
+            background: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+        }
+
+        .demo-content {
+            display: none;
+        }
+
+        .demo-content.active {
+            display: block;
+        }
+
+        .demo-panel {
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--text-dark);
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 16px;
+            transition: border-color 0.3s ease;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .btn-demo {
+            width: 100%;
+            padding: 14px;
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.3s ease;
+        }
+
+        .btn-demo:hover {
+            background: #45a049;
+        }
+
+        .btn-demo:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .result-box {
+            margin-top: 20px;
+            padding: 20px;
+            background: var(--light-bg);
+            border-radius: 6px;
+            border-left: 4px solid var(--primary-color);
+            display: none;
+        }
+
+        .result-box.show {
+            display: block;
+        }
+
+        .result-box h4 {
+            margin-bottom: 10px;
+            color: var(--primary-color);
+        }
+
+        .result-box pre {
+            background: #f9f9f9;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 14px;
+        }
+
+        .result-list {
+            list-style: none;
+        }
+
+        .result-item {
+            padding: 12px;
+            margin-bottom: 10px;
+            background: white;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+        }
+
+        .result-item strong {
+            color: var(--primary-color);
+        }
+
+        /* Stats Section */
+        .stats {
+            padding: 60px 20px;
+            background: white;
+            text-align: center;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 30px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .stat-card {
+            padding: 20px;
+        }
+
+        .stat-number {
+            font-size: 3em;
+            font-weight: 700;
+            color: var(--primary-color);
+            line-height: 1;
+            margin-bottom: 10px;
+        }
+
+        .stat-label {
+            font-size: 1.1em;
+            color: var(--text-light);
+        }
+
+        /* Footer */
+        .footer {
+            background: var(--dark-bg);
+            color: #ccc;
+            padding: 40px 20px;
+            text-align: center;
+        }
+
+        .footer a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+
+        .footer-links {
+            margin: 20px 0;
+        }
+
+        .footer-links a {
+            margin: 0 15px;
+        }
+
+        .attribution {
+            margin-top: 20px;
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+
+        /* Loading Spinner */
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid var(--primary-color);
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+            display: none;
+        }
+
+        .spinner.show {
+            display: block;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Map placeholder */
+        .map-placeholder {
+            width: 100%;
+            height: 300px;
+            background: #e0e0e0;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #999;
+            font-size: 1.2em;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Hero Section -->
+    <div class="hero">
+        <div class="container">
+            <h1>🏠 Address Autocomplete API</h1>
+            <p>High-performance, open-source German address search with intelligent fuzzy matching, typo tolerance, and reverse geocoding. Free to use for developers.</p>
+            <div class="hero-buttons">
+                <a href="#demo" class="btn btn-primary">Try Live Demo</a>
+                <a href="https://github.com/morta5/adressSuche" target="_blank" class="btn btn-outline">View on GitHub</a>
+                <a href="/docs" class="btn btn-outline">API Docs</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Features Section -->
+    <div class="features">
+        <div class="container">
+            <h2>✨ Key Features</h2>
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <h3>🔍 Intelligent Search</h3>
+                    <p>Multi-stage retrieval with exact matching, trigram FTS, and phonetic search. Automatically handles German abbreviations and city detection.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>⚡ Lightning Fast</h3>
+                    <p>&lt;50ms for exact queries, &lt;300ms for complex fuzzy searches. Optimized database indexes and caching for maximum performance.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>🎯 Typo Tolerance</h3>
+                    <p>Finds addresses even with spelling mistakes. "Kiler Straße" finds "Kieler Straße" automatically using Levenshtein distance and phonetic matching.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>📍 Reverse Geocoding</h3>
+                    <p>Convert coordinates to addresses. Finds the nearest house number or street segment with configurable search radius.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>✅ Address Validation</h3>
+                    <p>Validate street names and house numbers. Get exact coordinates for validated addresses with distance calculations.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>🌐 Open Source</h3>
+                    <p>AGPLv3 licensed. Free to use, modify, and distribute. Built with FastAPI, SQLite, and modern web technologies.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Stats Section -->
+    <div class="stats">
+        <div class="container">
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-number">&lt;50ms</div>
+                    <div class="stat-label">Response Time</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">100%</div>
+                    <div class="stat-label">Open Source</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">3</div>
+                    <div class="stat-label">API Endpoints</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Demo Section -->
+    <div class="demo" id="demo">
+        <div class="container">
+            <h2>🎮 Interactive Demo</h2>
+            
+            <div class="demo-tabs">
+                <div class="demo-tab active" data-tab="autocomplete">Address Search</div>
+                <div class="demo-tab" data-tab="validate">Address Validation</div>
+                <div class="demo-tab" data-tab="reverse">Reverse Geocoding</div>
+            </div>
+
+            <!-- Autocomplete Demo -->
+            <div class="demo-content active" id="autocomplete-demo">
+                <div class="demo-panel">
+                    <h3>🔍 Address Autocomplete</h3>
+                    <p>Search for street names with intelligent fuzzy matching and typo tolerance.</p>
+                    
+                    <form id="autocomplete-form" style="margin-top: 30px;">
+                        <div class="form-group">
+                            <label for="search-query">Search Query</label>
+                            <input type="text" id="search-query" placeholder="e.g., Hauptstraße, Kieler Str Berlin, banhofstrasse (typo)" autocomplete="off">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="search-city">City (optional)</label>
+                                <input type="text" id="search-city" placeholder="e.g., Hamburg">
+                            </div>
+                            <div class="form-group">
+                                <label for="search-limit">Limit</label>
+                                <input type="number" id="search-limit" value="10" min="1" max="100">
+                            </div>
+                        </div>
+                        <button type="submit" class="btn-demo">Search</button>
+                    </form>
+
+                    <div class="spinner" id="autocomplete-spinner"></div>
+                    <div class="result-box" id="autocomplete-results">
+                        <h4>Results:</h4>
+                        <ul class="result-list" id="autocomplete-list"></ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Validate Demo -->
+            <div class="demo-content" id="validate-demo">
+                <div class="demo-panel">
+                    <h3>✅ Address Validation</h3>
+                    <p>Validate if a specific street and house number combination exists.</p>
+                    
+                    <form id="validate-form" style="margin-top: 30px;">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="validate-street">Street Name</label>
+                                <input type="text" id="validate-street" placeholder="e.g., Hauptstraße" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="validate-number">House Number</label>
+                                <input type="text" id="validate-number" placeholder="e.g., 42" required>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="validate-city">City (optional)</label>
+                            <input type="text" id="validate-city" placeholder="e.g., Hamburg">
+                        </div>
+                        <button type="submit" class="btn-demo">Validate Address</button>
+                    </form>
+
+                    <div class="spinner" id="validate-spinner"></div>
+                    <div class="result-box" id="validate-results">
+                        <h4>Validation Result:</h4>
+                        <div id="validate-output"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Reverse Demo -->
+            <div class="demo-content" id="reverse-demo">
+                <div class="demo-panel">
+                    <h3>📍 Reverse Geocoding</h3>
+                    <p>Find the nearest address or street from geographic coordinates.</p>
+                    
+                    <form id="reverse-form" style="margin-top: 30px;">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="reverse-lat">Latitude</label>
+                                <input type="number" id="reverse-lat" placeholder="e.g., 53.5511" step="0.000001" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="reverse-lon">Longitude</label>
+                                <input type="number" id="reverse-lon" placeholder="e.g., 9.9937" step="0.000001" required>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="reverse-distance">Max Distance (km)</label>
+                            <input type="number" id="reverse-distance" placeholder="0.1 (default)" step="0.1" min="0.01">
+                        </div>
+                        <button type="submit" class="btn-demo">Find Address</button>
+                        <button type="button" class="btn-demo" style="background: var(--secondary-color); margin-top: 10px;" onclick="getUserLocation()">Use My Location</button>
+                    </form>
+
+                    <div class="spinner" id="reverse-spinner"></div>
+                    <div class="result-box" id="reverse-results">
+                        <h4>Reverse Geocoding Result:</h4>
+                        <div id="reverse-output"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+        <div class="container">
+            <p>&copy; 2024 Address Autocomplete API | Open Source Project</p>
+            <div class="footer-links">
+                <a href="https://github.com/morta5/adressSuche" target="_blank">GitHub</a>
+                <a href="/docs">API Documentation</a>
+                <a href="https://github.com/morta5/adressSuche/issues" target="_blank">Report Issue</a>
+            </div>
+            <div class="attribution">
+                Data Sources: <a href="https://arcg.is/0nXTyK" target="_blank">Esri Deutschland (CC BY 4.0)</a> | 
+                <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap (ODbL)</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tab switching
+        document.querySelectorAll('.demo-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabName = tab.getAttribute('data-tab');
+                
+                // Update tabs
+                document.querySelectorAll('.demo-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                
+                // Update content
+                document.querySelectorAll('.demo-content').forEach(c => c.classList.remove('active'));
+                document.getElementById(`${tabName}-demo`).classList.add('active');
+            });
+        });
+
+        // API Base URL - auto-detect
+        const API_URL = window.location.origin;
+
+        // Autocomplete Search
+        document.getElementById('autocomplete-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const query = document.getElementById('search-query').value;
+            const city = document.getElementById('search-city').value;
+            const limit = document.getElementById('search-limit').value;
+            
+            const spinner = document.getElementById('autocomplete-spinner');
+            const results = document.getElementById('autocomplete-results');
+            const list = document.getElementById('autocomplete-list');
+            
+            spinner.classList.add('show');
+            results.classList.remove('show');
+            
+            try {
+                const params = new URLSearchParams({ query, limit });
+                if (city) params.append('city', city);
+                
+                const response = await fetch(`${API_URL}/autocomplete?${params}`);
+                const data = await response.json();
+                
+                spinner.classList.remove('show');
+                results.classList.add('show');
+                
+                if (data.length === 0) {
+                    list.innerHTML = '<li class="result-item">No results found</li>';
+                } else {
+                    list.innerHTML = data.map(item => `
+                        <li class="result-item">
+                            <strong>${item.name}</strong> - ${item.city} (${item.postal_code || 'N/A'})<br>
+                            <small>Score: ${(item.match_score * 100).toFixed(0)}% | ${item.distance_km ? `Distance: ${item.distance_km} km` : ''}</small>
+                        </li>
+                    `).join('');
+                }
+            } catch (error) {
+                spinner.classList.remove('show');
+                results.classList.add('show');
+                list.innerHTML = `<li class="result-item" style="color: red;">Error: ${error.message}</li>`;
+            }
+        });
+
+        // Address Validation
+        document.getElementById('validate-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const street = document.getElementById('validate-street').value;
+            const number = document.getElementById('validate-number').value;
+            const city = document.getElementById('validate-city').value;
+            
+            const spinner = document.getElementById('validate-spinner');
+            const results = document.getElementById('validate-results');
+            const output = document.getElementById('validate-output');
+            
+            spinner.classList.add('show');
+            results.classList.remove('show');
+            
+            try {
+                const params = new URLSearchParams({ 
+                    street_name: street, 
+                    house_number: number 
+                });
+                if (city) params.append('city', city);
+                
+                const response = await fetch(`${API_URL}/validate?${params}`);
+                const data = await response.json();
+                
+                spinner.classList.remove('show');
+                results.classList.add('show');
+                
+                if (data.exists) {
+                    output.innerHTML = `
+                        <div style="color: green; font-weight: bold; margin-bottom: 15px;">✅ Address Found!</div>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                } else {
+                    output.innerHTML = `
+                        <div style="color: red; font-weight: bold;">❌ Address Not Found</div>
+                    `;
+                }
+            } catch (error) {
+                spinner.classList.remove('show');
+                results.classList.add('show');
+                output.innerHTML = `<div style="color: red;">Error: ${error.message}</div>`;
+            }
+        });
+
+        // Reverse Geocoding
+        document.getElementById('reverse-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const lat = document.getElementById('reverse-lat').value;
+            const lon = document.getElementById('reverse-lon').value;
+            const distance = document.getElementById('reverse-distance').value;
+            
+            const spinner = document.getElementById('reverse-spinner');
+            const results = document.getElementById('reverse-results');
+            const output = document.getElementById('reverse-output');
+            
+            spinner.classList.add('show');
+            results.classList.remove('show');
+            
+            try {
+                const params = new URLSearchParams({ 
+                    latitude: lat, 
+                    longitude: lon 
+                });
+                if (distance) params.append('max_distance_km', distance);
+                
+                const response = await fetch(`${API_URL}/reverse?${params}`);
+                const data = await response.json();
+                
+                spinner.classList.remove('show');
+                results.classList.add('show');
+                
+                if (data.exists) {
+                    output.innerHTML = `
+                        <div style="color: green; font-weight: bold; margin-bottom: 15px;">✅ Address Found!</div>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                } else {
+                    output.innerHTML = `
+                        <div style="color: orange; font-weight: bold;">⚠️ No Address Found Within Search Radius</div>
+                    `;
+                }
+            } catch (error) {
+                spinner.classList.remove('show');
+                results.classList.add('show');
+                output.innerHTML = `<div style="color: red;">Error: ${error.message}</div>`;
+            }
+        });
+
+        // Get user location
+        function getUserLocation() {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition((position) => {
+                    document.getElementById('reverse-lat').value = position.coords.latitude.toFixed(6);
+                    document.getElementById('reverse-lon').value = position.coords.longitude.toFixed(6);
+                }, (error) => {
+                    alert('Error getting location: ' + error.message);
+                });
+            } else {
+                alert('Geolocation is not supported by your browser');
+            }
+        }
+    </script>
+</body>
+</html>
