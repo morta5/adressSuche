@@ -37,6 +37,15 @@ from utils import (
 HIGH_QUALITY_SCORE_THRESHOLD = 0.7  # Score threshold for early exit optimization
 FUZZY_TRIGRAM_CANDIDATE_LIMIT = 3000  # Max candidates to fetch from trigram search
 
+# Performance tuning constants for stage limits
+TRIGRAM_LIMIT_MULTIPLIER = 15  # Multiplier for trigram search results
+TRIGRAM_MIN_LIMIT = 300  # Minimum results for trigram search
+PHONETIC_LIMIT_MULTIPLIER = 20  # Multiplier for phonetic search results
+PHONETIC_MIN_LIMIT = 100  # Minimum results for phonetic search
+PHONETIC_MAX_LIMIT = 250  # Maximum results for phonetic search
+RERANK_CANDIDATE_MULTIPLIER = 4  # Multiplier for reranking candidate pool
+RERANK_MIN_CANDIDATES = 50  # Minimum candidates for reranking
+
 # Unicode constants for prefix range queries
 UNICODE_MAX_CODEPOINT = 0x10FFFF  # Maximum valid Unicode code point
 UNICODE_FALLBACK_UPPER = "\uffff"  # Fallback upper bound for prefix range
@@ -400,8 +409,8 @@ async def autocomplete(
     async def trigram_search() -> list[tuple[StreetAutocompleteResponse, float, int]]:
         if len(qc) < 2:
             return []
-        # Reduced from 25x to 15x for better performance
-        trigram_limit = max(limit * 15, 300)
+        # Use performance tuning constants
+        trigram_limit = max(limit * TRIGRAM_LIMIT_MULTIPLIER, TRIGRAM_MIN_LIMIT)
         params: Dict[str, Any] = {"pattern": f"{qc}*", "limit": trigram_limit}
         sql = [
             "SELECT s.id AS street_id, s.name, s.city, s.postal_code, s.latitude, s.longitude,",
@@ -513,9 +522,9 @@ async def autocomplete(
         if not qg and not qc_ph and not q_cons:
             return []
 
-        # Reduced prelimit for better performance (was 30x, now 20x)
+        # Use performance tuning constants
         params: Dict[str, Any] = {
-            "prelimit": max(100, min(250, limit * 20)),
+            "prelimit": max(PHONETIC_MIN_LIMIT, min(PHONETIC_MAX_LIMIT, limit * PHONETIC_LIMIT_MULTIPLIER)),
         }
 
         where_clauses = []
@@ -840,9 +849,9 @@ async def autocomplete(
             by_id[sid] = (resp, sc)
 
     # Optional phonetic + normalized fuzzy reranking on top K candidates
-    # Reduce candidate pool for faster reranking (was limit * 8, now limit * 4)
+    # Use performance tuning constants for candidate pool size
     top_candidates = sorted(by_id.values(), key=lambda t: t[1], reverse=True)[
-        : max(limit * 4, 50)
+        : max(limit * RERANK_CANDIDATE_MULTIPLIER, RERANK_MIN_CANDIDATES)
     ]
     reranked: list[tuple[StreetAutocompleteResponse, float]] = []
     qn_norm = normalize_string(query)
