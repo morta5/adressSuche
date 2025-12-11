@@ -130,7 +130,7 @@ _known_cities: set[str] | None = None
 _known_cities_lock = threading.Lock()
 
 
-def _get_known_cities(db_path: str = "./autocomplete.db") -> set[str]:
+def _get_known_cities(db_path: str = "./autocomplete_v2.db") -> set[str]:
     """Load known city names from the database (cached, case-insensitive)."""
     global _known_cities
 
