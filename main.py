@@ -278,8 +278,14 @@ async def autocomplete(
             city = detected_city
             logger.debug(f"Extracted city '{city}' from query, street query: '{query}'")
 
+    # Cache normalized forms to avoid recalculating
     qc = normalize_compact(query)
     qn = normalize_string(query)
+    qc_lower = qc.lower() if qc else ""
+
+    # Cache phonetic forms for reuse across stages
+    qg_phonetic, qc_phonetic = phonetic_forms(query)
+    q_consonant = consonant_key(query)
 
     # Query expansion (abbr/suffix/hyphen)
     expanded_queries = QueryProcessor.expand_query(query)
@@ -382,7 +388,8 @@ async def autocomplete(
     async def trigram_search() -> list[tuple[StreetAutocompleteResponse, float, int]]:
         if len(qc) < 2:
             return []
-        trigram_limit = max(limit * 25, 400)
+        # Reduced from 25x to 15x for better performance
+        trigram_limit = max(limit * 15, 300)
         params: Dict[str, Any] = {"pattern": f"{qc}*", "limit": trigram_limit}
         sql = [
             "SELECT s.id AS street_id, s.name, s.city, s.postal_code, s.latitude, s.longitude,",
@@ -486,15 +493,17 @@ async def autocomplete(
 
     # Stage D: Phonetic search using precomputed phonetic codes (SIMPLIFIED for speed)
     async def phonetic_stage() -> list[tuple[StreetAutocompleteResponse, float, int]]:
-        qg, qc_ph = phonetic_forms(query)
-        q_cons = consonant_key(query)
+        # Use cached phonetic forms
+        qg = qg_phonetic
+        qc_ph = qc_phonetic
+        q_cons = q_consonant
 
         if not qg and not qc_ph and not q_cons:
             return []
 
-        # Simpler, faster phonetic query - just use index prefix matching
+        # Reduced prelimit for better performance (was 30x, now 20x)
         params: Dict[str, Any] = {
-            "prelimit": max(100, min(300, limit * 30)),
+            "prelimit": max(100, min(250, limit * 20)),
         }
 
         where_clauses = []
@@ -625,7 +634,7 @@ async def autocomplete(
         parts of the string. This allows matching even when some trigrams are
         affected by typos. The Levenshtein distance filter then removes false positives.
         """
-        qc_lower = qc.lower() if qc else ""
+        # Use cached normalized form
         if len(qc_lower) < 3:
             return []
 
@@ -819,8 +828,9 @@ async def autocomplete(
             by_id[sid] = (resp, sc)
 
     # Optional phonetic + normalized fuzzy reranking on top K candidates
+    # Reduce candidate pool for faster reranking (was limit * 8, now limit * 4)
     top_candidates = sorted(by_id.values(), key=lambda t: t[1], reverse=True)[
-        : max(limit * 8, 100)
+        : max(limit * 4, 50)
     ]
     reranked: list[tuple[StreetAutocompleteResponse, float]] = []
     qn_norm = normalize_string(query)
