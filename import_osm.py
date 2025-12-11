@@ -456,15 +456,30 @@ class StreetStreamingHandler(SimpleHandler):
                 postal = ""
             
             # Determine city
-            # Prioritize level 8 (municipality), but if missing, check level 6 (independent city) or 7
-            city = level8
-            if not city:
-                city = level6 or level7
+            # Priority:
+            # 1. Level 6 (independent cities: Hamburg, Berlin, Bremen, etc.) - these are city-states
+            # 2. Level 8 (municipalities) - regular towns and cities
+            # 3. Tags (addr:city, etc.)
+            # 4. Level 7 (counties/Landkreise) - only as fallback
+            # 5. Borough/suburb - ONLY if no higher-level city found AND no tags
+            #    (borough/suburb should supplement, not replace the city)
             
-            if not city:
+            city = None
+            
+            # First check Level 6 (independent city-states)
+            if level6:
+                city = level6
+            # Then Level 8 (municipalities)
+            elif level8:
+                city = level8
+            # Try tags
+            elif not city:
                 city = self._infer_city_from_tags(tags)
-            
-            if not city:
+            # Fallback to Level 7 (county)
+            elif not city and level7:
+                city = level7
+            # Last resort: use borough/suburb only if absolutely nothing else found
+            elif not city:
                 city = borough or suburb
             
             if city:
@@ -686,9 +701,17 @@ class AddressStreamingHandler(SimpleHandler):
         if not city or not postal_code:
             point = Point(lon, lat)
             lookup_postal, level8, level7, level6, borough, suburb, _ = self.areas.lookup(point)
-            # Use municipality (Level 8), or fallback to others
+            # Use city priority: Level 6 (city-states) > Level 8 (municipalities) > Level 7 (counties)
+            # Borough/suburb should only be used as last resort
             if not city:
-                city = level8 or level6 or level7 or borough or suburb
+                if level6:
+                    city = level6
+                elif level8:
+                    city = level8
+                elif level7:
+                    city = level7
+                else:
+                    city = borough or suburb
             
             if not postal_code:
                 postal_code = lookup_postal
