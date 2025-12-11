@@ -138,6 +138,27 @@ TEST_CASES: List[APITestCase] = [
         max_time_ms=500,
         description="City parsing: 'jungfernstieg hamburg' should find result in Hamburg",
     ),
+    # Bug report test cases - these should find "Kieler Straße" in Neumünster
+    APITestCase(
+        name="kiler_strasse_neumuenster_typo",
+        query="Kiler Straße Neumünster",
+        latitude=54.0863,
+        longitude=9.9757,
+        expected_result="Kieler Straße",
+        expected_city="Neumünster",
+        max_time_ms=500,
+        description="Bug: 'Kiler Straße Neumünster' should find 'Kieler Straße' in Neumünster (typo in first word + city)",
+    ),
+    APITestCase(
+        name="kieler_strasse_neumuenster_with_city",
+        query="Kieler Straße Neumünster",
+        latitude=54.0863,
+        longitude=9.9757,
+        expected_result="Kieler Straße",
+        expected_city="Neumünster",
+        max_time_ms=100,
+        description="Bug: 'Kieler Straße Neumünster' should find 'Kieler Straße' in Neumünster",
+    ),
 ]
 
 # Minimum size for real database in bytes (1MB)

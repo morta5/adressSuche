@@ -726,6 +726,9 @@ async def autocomplete(
     # Run retrieval stages with early exit optimization
     # Fast stages first, skip slow stages if we have enough results
 
+    # Store the original city filter for potential fallback
+    original_city = city
+
     # Stage A: Exact prefix (fast, uses index)
     stage_a = await exact_prefix()
 
@@ -741,6 +744,23 @@ async def autocomplete(
     stage_b = []
     if len(stage_a) < limit:
         stage_b = await trigram_search()
+
+    # If city filter was applied but we got no results, try again without city filter
+    # This handles cases where city name doesn't match exactly in database
+    if original_city and len(stage_a) == 0 and len(stage_b) == 0:
+        logger.debug(f"No results found with city filter '{original_city}', retrying without city filter")
+        city = None  # Temporarily remove city filter
+        stage_a_fallback = await exact_prefix()
+        stage_b_fallback = await trigram_search()
+        # Restore city filter for subsequent stages
+        city = original_city
+        # Merge fallback results (they will be penalized by distance if geo coords provided)
+        stage_a.extend(stage_a_fallback)
+        stage_b.extend(stage_b_fallback)
+        stage_a_has_matches = len(stage_a) > 0
+        stage_a_has_good_match = any(
+            sc >= HIGH_QUALITY_SCORE_THRESHOLD for _, sc, _ in stage_a
+        )
 
     # Early exit check after fast stages
     fast_results = [*stage_a, *stage_b]
