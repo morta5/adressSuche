@@ -29,6 +29,8 @@ from utils import (
     haversine_distance,
     normalize_string,
     normalize_compact,
+    normalize_city_for_matching,
+    generate_city_variations,
     calculate_fuzzy_score_normalized,
     consonant_key,
     point_to_segment_distance,
@@ -930,11 +932,17 @@ async def validate_address(
     db: AsyncSession = Depends(get_async_db),
 ):
     target_norm = normalize_string(street_name)
+    
+    # Normalize city for flexible matching (handles "Henstedt Ulzburg" vs "Henstedt-Ulzburg" and "Kreis Plön" vs "Plön")
+    city_norm = normalize_city_for_matching(city) if city else None
+    city_variations = generate_city_variations(city) if city else []
 
     # Try strict normalized match first
     stmt = select(Street).where(Street.normalized_search == target_norm)
-    if city:
-        stmt = stmt.where(Street.city.ilike(f"{city}%"))
+    if city_norm and city_variations:
+        # Use flexible city matching with all variations
+        city_conditions = [Street.city.ilike(f"{var}%") for var in city_variations]
+        stmt = stmt.where(or_(*city_conditions))
     res = await db.execute(stmt.limit(30))
     streets = res.scalars().all()
 
@@ -954,10 +962,35 @@ async def validate_address(
                 Street.phonetic_cologne.like(f"{qc_ph[: max(1, len(qc_ph) - 1)]}%")
             )
         stmt2 = select(Street).where(or_(*conditions)).limit(60)
-        if city:
-            stmt2 = stmt2.where(Street.city.ilike(f"{city}%"))
+        if city_norm and city_variations:
+            # Use flexible city matching here too
+            city_conditions = [Street.city.ilike(f"{var}%") for var in city_variations]
+            stmt2 = stmt2.where(or_(*city_conditions))
         res2 = await db.execute(stmt2)
         streets = res2.scalars().all()
+    
+    # If city filter was provided, filter streets by normalized city name for better matching
+    if city_norm and streets:
+        filtered_streets = []
+        for st in streets:
+            st_city_norm = normalize_city_for_matching(str(getattr(st, "city")))
+            # Check if normalized cities match or start with the same prefix
+            if st_city_norm.startswith(city_norm) or city_norm.startswith(st_city_norm):
+                filtered_streets.append(st)
+        # Only use filtered results if we found matches, otherwise keep all
+        if filtered_streets:
+            streets = filtered_streets
+    
+    # If lat/lng provided, sort streets by distance to prefer nearby matches
+    if latitude is not None and longitude is not None and streets:
+        streets = sorted(
+            streets,
+            key=lambda st: haversine_distance(
+                latitude, longitude,
+                float(getattr(st, "latitude")),
+                float(getattr(st, "longitude"))
+            )
+        )
 
     # Check addresses on found streets
     for st in streets:
@@ -1010,32 +1043,45 @@ async def validate_address(
             nearest_hn = find_nearest_house_number(house_number, available_house_numbers)
             
             if nearest_hn:
-                # Find the address with this house number
-                for addr in all_addresses:
-                    if str(getattr(addr, "house_number")) == nearest_hn:
-                        resp = AddressValidationResponse(
-                            exists=True,
-                            address_id=int(getattr(addr, "id")),
-                            street_name=str(getattr(st, "name")),
-                            city=str(getattr(st, "city")),
-                            postal_code=str(getattr(st, "postal_code"))
-                            if getattr(st, "postal_code") is not None
-                            else None,
-                            house_number=str(getattr(addr, "house_number")),
-                            latitude=float(getattr(addr, "latitude")),
-                            longitude=float(getattr(addr, "longitude")),
+                # Find all addresses with this house number (could be multiple on same street)
+                matching_addresses = [addr for addr in all_addresses if str(getattr(addr, "house_number")) == nearest_hn]
+                
+                # If lat/lng provided, pick the closest address
+                if latitude is not None and longitude is not None and matching_addresses:
+                    matching_addresses = sorted(
+                        matching_addresses,
+                        key=lambda a: haversine_distance(
+                            latitude, longitude,
+                            float(getattr(a, "latitude")),
+                            float(getattr(a, "longitude"))
                         )
-                        if latitude is not None and longitude is not None:
-                            resp.distance_km = round(
-                                haversine_distance(
-                                    float(latitude),
-                                    float(longitude),
-                                    float(getattr(addr, "latitude")),
-                                    float(getattr(addr, "longitude")),
-                                ),
-                                2,
-                            )
-                        return resp
+                    )
+                
+                if matching_addresses:
+                    addr = matching_addresses[0]
+                    resp = AddressValidationResponse(
+                        exists=True,
+                        address_id=int(getattr(addr, "id")),
+                        street_name=str(getattr(st, "name")),
+                        city=str(getattr(st, "city")),
+                        postal_code=str(getattr(st, "postal_code"))
+                        if getattr(st, "postal_code") is not None
+                        else None,
+                        house_number=str(getattr(addr, "house_number")),
+                        latitude=float(getattr(addr, "latitude")),
+                        longitude=float(getattr(addr, "longitude")),
+                    )
+                    if latitude is not None and longitude is not None:
+                        resp.distance_km = round(
+                            haversine_distance(
+                                float(latitude),
+                                float(longitude),
+                                float(getattr(addr, "latitude")),
+                                float(getattr(addr, "longitude")),
+                            ),
+                            2,
+                        )
+                    return resp
 
     return AddressValidationResponse(exists=False)
 

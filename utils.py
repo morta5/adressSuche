@@ -248,6 +248,80 @@ def generate_fuzzy_variants(query: str) -> List[str]:
     return unique_variants
 
 
+def normalize_city_for_matching(city: str) -> str:
+    """
+    Normalize city name for flexible matching.
+    
+    Removes hyphens, spaces, and administrative prefixes to allow matching variations like:
+    - "Henstedt Ulzburg" with "Henstedt-Ulzburg"
+    - "Kreis Plön" with "Plön"
+    - "Stadt Hamburg" with "Hamburg"
+    
+    Args:
+        city: City name to normalize
+        
+    Returns:
+        Normalized city name (lowercase, no spaces/hyphens, umlauts converted, no admin prefixes)
+    """
+    # Remove common administrative prefixes
+    city_clean = city
+    admin_prefixes = ['kreis ', 'stadt ', 'gemeinde ', 'hansestadt ', 'landkreis ']
+    city_lower = city.lower()
+    for prefix in admin_prefixes:
+        if city_lower.startswith(prefix):
+            city_clean = city[len(prefix):]
+            break
+    
+    return normalize_compact(city_clean)
+
+
+def generate_city_variations(city: str) -> List[str]:
+    """
+    Generate city name variations for flexible matching in SQL queries.
+    
+    Handles cases like:
+    - "Henstedt Ulzburg" -> ["Henstedt Ulzburg", "Henstedt-Ulzburg"]
+    - "Kreis Plön" -> ["Kreis Plön", "Plön"]
+    
+    Args:
+        city: City name to generate variations for
+        
+    Returns:
+        List of city name variations to try in SQL queries
+    """
+    variations = [city]
+    
+    # Add space/hyphen variations
+    if ' ' in city:
+        variations.append(city.replace(' ', '-'))
+    if '-' in city:
+        variations.append(city.replace('-', ' '))
+    
+    # Remove administrative prefixes
+    admin_prefixes = ['kreis ', 'stadt ', 'gemeinde ', 'hansestadt ', 'landkreis ']
+    city_lower = city.lower()
+    for prefix in admin_prefixes:
+        if city_lower.startswith(prefix):
+            city_without_prefix = city[len(prefix):]
+            variations.append(city_without_prefix)
+            # Also add space/hyphen variations of the cleaned city
+            if ' ' in city_without_prefix:
+                variations.append(city_without_prefix.replace(' ', '-'))
+            if '-' in city_without_prefix:
+                variations.append(city_without_prefix.replace('-', ' '))
+            break
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_variations = []
+    for var in variations:
+        if var.lower() not in seen:
+            seen.add(var.lower())
+            unique_variations.append(var)
+    
+    return unique_variations
+
+
 def _calculate_fuzzy_score_core(
     query_norm: str, street_norm: str, max_distance: int = 2
 ) -> Tuple[int, float]:

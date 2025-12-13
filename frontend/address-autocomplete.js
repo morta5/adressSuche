@@ -426,6 +426,9 @@ class AddressAutocomplete {
         event.preventDefault();
         if (this.selectedIndex >= 0) {
           this.selectSuggestion(this.selectedIndex);
+        } else if (this.suggestions.length > 0) {
+          // If no item is selected but there are suggestions, select the first one
+          this.selectSuggestion(0);
         }
         break;
 
@@ -452,6 +455,42 @@ class AddressAutocomplete {
     try {
       // Show loading
       this._showLoading();
+
+      // Check if query contains a complete address with house number
+      const parsed = this._parseInput(query);
+      console.log("Parsed input:", parsed);
+      const hasHousenumber = parsed.housenumber && parsed.housenumber.trim() !== "";
+      
+      // If complete address detected, try validation first
+      if (hasHousenumber && parsed.street) {
+        console.log("Complete address detected, attempting validation...");
+        try {
+          const validationResult = await this.validateAddress({
+            street: parsed.street,
+            housenumber: parsed.housenumber,
+            postcode: parsed.postcode || "",
+            city: parsed.city || ""
+          });
+          
+          console.log("Validation result:", validationResult);
+          
+          if (validationResult.valid || validationResult.exists) {
+            // Show validation result as the primary suggestion
+            this.suggestions = [validationResult];
+            this._renderValidatedSuggestion(validationResult);
+            this.open();
+            this.currentRequest = null;
+            return;
+          } else {
+            console.log("Address not valid or does not exist, falling back to autocomplete");
+          }
+        } catch (validationError) {
+          // If validation fails, continue with normal autocomplete
+          console.log("Validation attempt failed, continuing with autocomplete:", validationError);
+        }
+      } else {
+        console.log("No complete address detected (hasHousenumber:", hasHousenumber, ", street:", parsed.street, ")");
+      }
 
       // Build query parameters
       const params = new URLSearchParams({
@@ -590,6 +629,49 @@ class AddressAutocomplete {
   }
 
   /**
+   * Render a validated address as a suggestion
+   * @private
+   */
+  _renderValidatedSuggestion(validatedAddress) {
+    this.suggestionBox.innerHTML = "";
+    this.selectedIndex = -1;
+
+    const item = document.createElement("div");
+    item.className = "address-autocomplete-item address-autocomplete-validated";
+    item.dataset.index = 0;
+
+    // Format validated address display
+    const street = validatedAddress.street || "";
+    const housenumber = validatedAddress.housenumber || "";
+    const postcode = validatedAddress.postcode || "";
+    const city = validatedAddress.city || "";
+
+    // Primary line: full address with house number (no badge, just complete address)
+    const primaryLine = document.createElement("div");
+    primaryLine.className = "address-autocomplete-primary";
+    primaryLine.innerHTML = `<strong>${this._escapeHtml(street)} ${this._escapeHtml(housenumber)}</strong>`;
+
+    // Secondary line: postcode and city with checkmark icon
+    const secondaryLine = document.createElement("div");
+    secondaryLine.className = "address-autocomplete-secondary";
+    secondaryLine.innerHTML = `<span class="address-autocomplete-check">✓</span> ${[postcode, city].filter(Boolean).join(" ")}`;
+
+    item.appendChild(primaryLine);
+    item.appendChild(secondaryLine);
+
+    // Show coordinates if available (subtle, in meta)
+    if (validatedAddress.latitude && validatedAddress.longitude) {
+      const metaLine = document.createElement("div");
+      metaLine.className = "address-autocomplete-meta";
+      metaLine.innerHTML = `<span class="address-autocomplete-check">✓</span> Adresse verifiziert`;
+      //item.appendChild(metaLine);
+    }
+
+    this.suggestionBox.appendChild(item);
+    this._renderAttribution();
+  }
+
+  /**
    * Update visual selection
    * @private
    */
@@ -626,27 +708,41 @@ class AddressAutocomplete {
       raw: suggestion.raw || null,
     };
 
+    // Check if this is a validated address (has house number)
+    const isValidatedAddress = suggestion.housenumber && suggestion.housenumber.trim() !== "";
+
     if (this.mode === "single") {
       // In single mode, format as: "Street [CURSOR], Postcode City"
       const street = suggestion.street || "";
+      const housenumber = suggestion.housenumber || "";
       const postcode = suggestion.postcode || "";
       const city = suggestion.city || "";
 
-      // Insert space after street for house number entry
-      let addressText = street + " ";
-      const cursorPosition = addressText.length; // Position after street and space
+      if (isValidatedAddress) {
+        // For validated addresses, fill complete address and blur
+        let addressText = `${street} ${housenumber}`;
+        if (postcode || city) {
+          addressText += `, ${[postcode, city].filter(Boolean).join(" ")}`;
+        }
+        this.input.value = addressText;
+        this.input.blur();
+      } else {
+        // For non-validated addresses, insert space after street for house number entry
+        let addressText = street + " ";
+        const cursorPosition = addressText.length; // Position after street and space
 
-      if (postcode && city) {
-        addressText += `, ${postcode} ${city}`;
+        if (postcode && city) {
+          addressText += `, ${postcode} ${city}`;
+        }
+
+        this.input.value = addressText;
+
+        // Set cursor position after street name
+        this.input.focus();
+        this.input.setSelectionRange(cursorPosition, cursorPosition);
+
+        this._enterVerificationMode(suggestion);
       }
-
-      this.input.value = addressText;
-
-      // Set cursor position after street name
-      this.input.focus();
-      this.input.setSelectionRange(cursorPosition, cursorPosition);
-
-      this._enterVerificationMode(suggestion);
     } else {
       // Fill multi-field inputs
       if (this.inputs.street)
@@ -655,14 +751,19 @@ class AddressAutocomplete {
         this.inputs.postcode.value = suggestion.postcode || "";
       if (this.inputs.city) this.inputs.city.value = suggestion.city || "";
 
+      // If validated address, fill house number if field exists
+      if (isValidatedAddress && this.inputs.housenumber) {
+        this.inputs.housenumber.value = suggestion.housenumber || "";
+      }
+
       // If no house number field exists and appendHousenumber is true, append space to street and keep input open
-      if (!this.inputs.housenumber && this.appendHousenumber) {
+      if (!isValidatedAddress && !this.inputs.housenumber && this.appendHousenumber) {
         if (this.inputs.street) {
           this.inputs.street.value = (suggestion.street || "") + " ";
           this.inputs.street.focus();
         }
         this._enterVerificationMode(suggestion);
-      } else if (this.inputs.housenumber) {
+      } else if (!isValidatedAddress && this.inputs.housenumber) {
         this.inputs.housenumber.focus();
       }
     }
@@ -670,7 +771,7 @@ class AddressAutocomplete {
     this.close();
 
     // If house number is provided in suggestion, trigger completion
-    if (suggestion.housenumber || !this.appendHousenumber) {
+    if (isValidatedAddress || !this.appendHousenumber) {
       this._handleAddressComplete(suggestion);
     }
   }
@@ -926,32 +1027,56 @@ class AddressAutocomplete {
     const trimmedValue = value.trim();
     if (!trimmedValue) return {};
 
-    let streetPart = trimmedValue;
-    let cityPart = "";
+    let parts = [];
+    let street = "";
+    let housenumber = "";
+    let postcode = "";
+    let city = "";
 
+    // First, try to split by comma if present
     const commaIndex = trimmedValue.indexOf(",");
+    let streetPart = "";
+    let cityPart = "";
+    
     if (commaIndex !== -1) {
       streetPart = trimmedValue.slice(0, commaIndex).trim();
       cityPart = trimmedValue.slice(commaIndex + 1).trim();
+    } else {
+      // No comma - need to parse the whole string
+      // Try to find pattern: "street housenumber rest"
+      const match = trimmedValue.match(/^(.*?)(\s+\d+[a-zA-Z\/-]*)(.*)$/);
+      if (match) {
+        streetPart = (match[1] + match[2]).trim();
+        cityPart = match[3].trim();
+      } else {
+        // No house number found
+        streetPart = trimmedValue;
+      }
     }
 
-    let street = streetPart;
-    let housenumber = "";
-
+    // Extract street and house number from streetPart
     const streetMatch = streetPart.match(/^(.*?)(\s+(\d+[a-zA-Z\/-]*))$/);
     if (streetMatch) {
       street = streetMatch[1].trim();
       housenumber = streetMatch[3].trim();
+    } else {
+      street = streetPart.trim();
     }
 
-    let postcode = "";
-    let city = cityPart;
-
-    const cityMatch = cityPart.match(/^(\d{4,5})\s*(.*)$/);
-    if (cityMatch) {
-      postcode = cityMatch[1].trim();
-      city = cityMatch[2].trim();
+    // Extract postcode and city from cityPart
+    if (cityPart) {
+      // Try pattern: "12345 City" or "12345City"
+      const postcodeMatch = cityPart.match(/^(\d{4,5})\s*(.*)$/);
+      if (postcodeMatch) {
+        postcode = postcodeMatch[1].trim();
+        city = postcodeMatch[2].trim();
+      } else {
+        // No postcode, just city name
+        city = cityPart.trim();
+      }
     }
+
+    console.log("Parsed:", { street, housenumber, postcode, city, original: trimmedValue });
 
     return {
       street,
@@ -1077,6 +1202,23 @@ class AddressAutocomplete {
 
             .address-autocomplete-theme-dark .address-autocomplete-primary {
                 color: #e0e0e0;
+            }
+
+            .address-autocomplete-check {
+                display: inline-block;
+                color: #4CAF50;
+                font-weight: bold;
+                margin-right: 4px;
+            }
+
+            .address-autocomplete-validated {
+                background-color: #f8fdf8;
+                border-left: 3px solid #4CAF50;
+            }
+
+            .address-autocomplete-theme-dark .address-autocomplete-validated {
+                background-color: #1e2e1e;
+                border-left-color: #66BB6A;
             }
 
             .address-autocomplete-secondary {
