@@ -551,3 +551,133 @@ def should_expand_suffix(query: str) -> bool:
     ]
 
     return any(query_lower.endswith(suffix) for suffix in partial_suffixes)
+
+
+def parse_house_number(house_number: str) -> Optional[int]:
+    """
+    Extract the numeric part from a house number.
+    
+    Examples:
+        "38" -> 38
+        "38a" -> 38
+        "38-40" -> 38
+        "38 a" -> 38
+    
+    Args:
+        house_number: The house number string
+        
+    Returns:
+        The numeric part as integer, or None if no number found
+    """
+    if not house_number:
+        return None
+    
+    # Extract first number from the string
+    match = re.match(r'^\s*(\d+)', house_number.strip())
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def find_nearest_house_number(target: str, available: List[str]) -> Optional[str]:
+    """
+    Find the nearest house number from a list of available house numbers.
+    
+    The matching priority is:
+    1. Exact match (e.g., "38a" -> "38a")
+    2. Same number, different suffix (e.g., "38d" -> "38a" if 38a exists)
+    3. Nearest number by numeric value (e.g., "37" -> "36")
+    
+    Args:
+        target: The target house number (e.g., "38a", "37")
+        available: List of available house numbers
+        
+    Returns:
+        The nearest house number from the available list, or None if list is empty
+    """
+    if not available:
+        return None
+    
+    if not target:
+        return None
+    
+    # First, check for exact match
+    target_stripped = target.strip()
+    for hn in available:
+        if hn.strip() == target_stripped:
+            return hn
+    
+    # Parse target number
+    target_num = parse_house_number(target)
+    if target_num is None:
+        # If we can't parse the target, return first available
+        return available[0] if available else None
+    
+    # Look for matches with the same base number (priority 2)
+    same_number_candidates = []
+    for hn in available:
+        hn_num = parse_house_number(hn)
+        if hn_num == target_num:
+            same_number_candidates.append(hn)
+    
+    # If we found house numbers with the same base number, prefer those
+    if same_number_candidates:
+        # Extract suffix from target (everything after the number)
+        target_match = re.match(r'^\s*\d+(.*)$', target_stripped)
+        target_suffix = target_match.group(1).strip() if target_match else ""
+        
+        # Find the candidate with the closest suffix
+        best_candidate = None
+        best_suffix_distance = float('inf')
+        
+        for candidate in same_number_candidates:
+            candidate_match = re.match(r'^\s*\d+(.*)$', candidate.strip())
+            candidate_suffix = candidate_match.group(1).strip() if candidate_match else ""
+            
+            # Calculate "distance" between suffixes
+            if target_suffix == candidate_suffix:
+                # Exact suffix match (shouldn't happen as we checked exact match earlier)
+                return candidate
+            elif not target_suffix or not candidate_suffix:
+                # One has no suffix - prefer the one without suffix
+                suffix_distance = 0 if not candidate_suffix else 1
+            else:
+                # Both have suffixes - calculate alphabetic distance
+                # For simple suffixes like "a", "b", "c", use character distance
+                if len(target_suffix) == 1 and len(candidate_suffix) == 1 and target_suffix.isalpha() and candidate_suffix.isalpha():
+                    suffix_distance = abs(ord(target_suffix.lower()) - ord(candidate_suffix.lower()))
+                else:
+                    # For complex suffixes, use string edit distance (simple approach)
+                    suffix_distance = abs(len(target_suffix) - len(candidate_suffix)) + (0 if target_suffix == candidate_suffix else 1)
+            
+            if suffix_distance < best_suffix_distance:
+                best_candidate = candidate
+                best_suffix_distance = suffix_distance
+            elif suffix_distance == best_suffix_distance and best_candidate:
+                # If same distance, prefer alphabetically lower
+                if candidate < best_candidate:
+                    best_candidate = candidate
+        
+        return best_candidate if best_candidate else same_number_candidates[0]
+    
+    # Fall back to finding the closest match by numeric value (priority 3)
+    best_match = None
+    best_distance = float('inf')
+    
+    for hn in available:
+        hn_num = parse_house_number(hn)
+        if hn_num is None:
+            continue
+        
+        distance = abs(target_num - hn_num)
+        
+        if distance < best_distance:
+            best_match = hn
+            best_distance = distance
+        elif distance == best_distance and best_match:
+            # If same distance, prefer lower alphabetically (for consistency)
+            if hn < best_match:
+                best_match = hn
+    
+    # If no numeric match found, return first available
+    return best_match if best_match else (available[0] if available else None)

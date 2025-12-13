@@ -32,6 +32,7 @@ from utils import (
     calculate_fuzzy_score_normalized,
     consonant_key,
     point_to_segment_distance,
+    find_nearest_house_number,
 )
 
 # Constants for search quality thresholds
@@ -957,6 +958,7 @@ async def validate_address(
 
     # Check addresses on found streets
     for st in streets:
+        # First try exact match
         a_stmt = (
             select(Address)
             .where(Address.street_id == st.id, Address.house_number == house_number)
@@ -964,6 +966,8 @@ async def validate_address(
         )
         ares = await db.execute(a_stmt)
         addr = ares.scalars().first()
+        
+        # If exact match found, return it
         if addr:
             resp = AddressValidationResponse(
                 exists=True,
@@ -988,6 +992,47 @@ async def validate_address(
                     2,
                 )
             return resp
+        
+        # If no exact match, try soft validation - find nearest house number
+        # Get all house numbers for this street
+        all_hn_stmt = select(Address).where(Address.street_id == st.id)
+        all_hn_res = await db.execute(all_hn_stmt)
+        all_addresses = all_hn_res.scalars().all()
+        
+        if all_addresses:
+            # Extract house numbers
+            available_house_numbers = [str(getattr(a, "house_number")) for a in all_addresses]
+            
+            # Find nearest house number
+            nearest_hn = find_nearest_house_number(house_number, available_house_numbers)
+            
+            if nearest_hn:
+                # Find the address with this house number
+                for addr in all_addresses:
+                    if str(getattr(addr, "house_number")) == nearest_hn:
+                        resp = AddressValidationResponse(
+                            exists=True,
+                            address_id=int(getattr(addr, "id")),
+                            street_name=str(getattr(st, "name")),
+                            city=str(getattr(st, "city")),
+                            postal_code=str(getattr(st, "postal_code"))
+                            if getattr(st, "postal_code") is not None
+                            else None,
+                            house_number=str(getattr(addr, "house_number")),
+                            latitude=float(getattr(addr, "latitude")),
+                            longitude=float(getattr(addr, "longitude")),
+                        )
+                        if latitude is not None and longitude is not None:
+                            resp.distance_km = round(
+                                haversine_distance(
+                                    float(latitude),
+                                    float(longitude),
+                                    float(getattr(addr, "latitude")),
+                                    float(getattr(addr, "longitude")),
+                                ),
+                                2,
+                            )
+                        return resp
 
     return AddressValidationResponse(exists=False)
 
