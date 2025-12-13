@@ -159,6 +159,18 @@ TEST_CASES: List[APITestCase] = [
         max_time_ms=150,  # Increased from 100ms to 150ms for realistic performance
         description="Bug: 'Kieler Straße Neumünster' should find 'Kieler Straße' in Neumünster",
     ),
+    # Test with highest ID Hauptstraße to ensure high rowid entries are found with geo-coordinates
+    # This is a stress test for the most common street name (6500+ entries)
+    APITestCase(
+        name="hauptstrasse_high_id",
+        query="hauptstraße",
+        latitude=54.1401559,  # Near Neuenkirchen (17498)
+        longitude=13.382598400000001,
+        expected_result="Hauptstraße",
+        expected_city="Neuenkirchen",
+        max_time_ms=200,
+        description="High rowid stress test: Hauptstraße with ID 1219975 in Neuenkirchen (0.64km away) should be found",
+    ),
 ]
 
 # Minimum size for real database in bytes (1MB)

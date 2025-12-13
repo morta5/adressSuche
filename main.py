@@ -3,13 +3,14 @@
 import asyncio
 import logging
 import math
+import os
 import sqlite3
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -261,9 +262,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Check if frontend should be served (controlled by environment variable)
+SERVE_FRONTEND = os.getenv("SERVE_FRONTEND", "false").lower() == "true"
+
 # Mount static files from frontend directory
 frontend_path = Path(__file__).parent / "frontend"
-if frontend_path.exists():
+if SERVE_FRONTEND and frontend_path.exists():
     app.mount("/static", StaticFiles(directory=str(frontend_path)), name="static")
 
 
@@ -272,13 +276,28 @@ async def _on_startup():
     init_db()
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def root():
     """Serve the homepage."""
+    if not SERVE_FRONTEND:
+        return {"message": "Street Autocomplete API v2", "docs": "/docs"}
+    
     index_path = frontend_path / "index.html"
     if index_path.exists():
         return HTMLResponse(content=index_path.read_text(), status_code=200)
     return {"message": "Street Autocomplete API v2", "docs": "/docs"}
+
+
+@app.get("/de")
+async def root_de():
+    """Serve the German homepage."""
+    if not SERVE_FRONTEND:
+        return {"message": "Street Autocomplete API v2", "docs": "/docs"}
+    
+    de_path = frontend_path / "de.html"
+    if de_path.exists():
+        return HTMLResponse(content=de_path.read_text(), status_code=200)
+    return {"message": "Street Autocomplete API v2 (DE)", "docs": "/docs"}
 
 
 @app.get("/autocomplete", response_model=List[StreetAutocompleteResponse])
@@ -333,10 +352,25 @@ async def autocomplete(
             return prefix + UNICODE_FALLBACK_UPPER  # Fallback for maximum codepoint
 
         # Use UNION of two indexed range queries instead of OR (which causes full scan)
+        # Adaptive limit based on query characteristics and geo coordinates:
+        # With ORDER BY distance in the SQL query, closest results come first,
+        # so we can use much lower limits when geo-coordinates are provided
+        # - With geo + ORDER BY distance: moderate limit (1000) is sufficient
+        # - No geo: small limit for performance
+        if latitude is not None and longitude is not None:
+            # With distance ordering, 1000 is enough even for common names like Hauptstraße
+            is_multiword = ' ' in query.strip()
+            if is_multiword or len(query) >= 10:
+                stage_a_limit = 1000
+            else:
+                stage_a_limit = limit * 8
+        else:
+            stage_a_limit = limit * 4
+        
         params: Dict[str, Any] = {
             "q1_start": query,
             "q1_end": prefix_end(query),
-            "limit": limit * 4,
+            "limit": stage_a_limit,
         }
 
         # Build the SQL with UNION to use index on both queries
@@ -367,6 +401,12 @@ async def autocomplete(
             # Wrap with city filter - explicitly list columns instead of SELECT *
             params["city"] = f"{city}%"
             sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({sql}) WHERE city LIKE :city"
+
+        # Order by distance when geo-coordinates are provided
+        if latitude is not None and longitude is not None:
+            params["user_lat"] = latitude
+            params["user_lon"] = longitude
+            sql += " ORDER BY ((latitude - :user_lat) * (latitude - :user_lat) + (longitude - :user_lon) * (longitude - :user_lon))"
 
         sql += " LIMIT :limit"
 

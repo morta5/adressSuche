@@ -103,6 +103,7 @@ def _build_geometries(relations: Sequence[Dict[str, object]], ways: Dict[int, ob
     Dict[str, MultiPolygon],
     Dict[str, MultiPolygon],
     Dict[str, MultiPolygon],
+    Dict[str, MultiPolygon],
     Dict[str, str],
     Dict[str, MultiPolygon],
     Dict[str, MultiPolygon],
@@ -114,6 +115,7 @@ def _build_geometries(relations: Sequence[Dict[str, object]], ways: Dict[int, ob
     level7_areas: Dict[str, MultiPolygon] = {}
     level6_areas: Dict[str, MultiPolygon] = {}
     level5_areas: Dict[str, MultiPolygon] = {}
+    level4_areas: Dict[str, MultiPolygon] = {}
     municipality_refs: Dict[str, str] = {}
     borough_areas: Dict[str, MultiPolygon] = {}
     suburb_areas: Dict[str, MultiPolygon] = {}
@@ -135,38 +137,84 @@ def _build_geometries(relations: Sequence[Dict[str, object]], ways: Dict[int, ob
         if multipolygon.is_empty or not multipolygon.is_valid:
             multipolygon = multipolygon.buffer(0)
         
-        # Simplify geometry to reduce memory usage
-        multipolygon = multipolygon.simplify(0.0001, preserve_topology=True)
+        # Don't simplify - it breaks STRtree spatial indexing
+        # multipolygon = multipolygon.simplify(0.0001, preserve_topology=True)
         
         if multipolygon.is_empty:
             continue
 
         if record['boundary'] == 'postal_code':
             postal_code = record['postal_code']  # type: ignore[assignment]
-            postal_areas[str(postal_code)] = multipolygon
+            key = str(postal_code)
+            # Merge with existing geometry if duplicate
+            if key in postal_areas:
+                from shapely.ops import unary_union
+                merged = unary_union([postal_areas[key], multipolygon])
+                if merged.geom_type == 'Polygon':
+                    postal_areas[key] = MultiPolygon([merged])
+                elif merged.geom_type == 'MultiPolygon':
+                    postal_areas[key] = merged
+                else:
+                    # Handle GeometryCollection or other types
+                    polys = [g for g in merged.geoms if g.geom_type in ('Polygon', 'MultiPolygon')]
+                    if polys:
+                        all_polys = []
+                        for p in polys:
+                            if p.geom_type == 'Polygon':
+                                all_polys.append(p)
+                            else:
+                                all_polys.extend(list(p.geoms))
+                        postal_areas[key] = MultiPolygon(all_polys)
+            else:
+                postal_areas[key] = multipolygon
         else:
             admin_level = str(record['admin_level'])
             name = str(record['name'])
             
+            # Helper function to merge or add geometry
+            def add_or_merge(areas_dict, name, geom, log_msg=None):
+                if name in areas_dict:
+                    from shapely.ops import unary_union
+                    merged = unary_union([areas_dict[name], geom])
+                    if merged.geom_type == 'Polygon':
+                        areas_dict[name] = MultiPolygon([merged])
+                    elif merged.geom_type == 'MultiPolygon':
+                        areas_dict[name] = merged
+                    else:
+                        # Handle GeometryCollection or other types
+                        polys = [g for g in merged.geoms if g.geom_type in ('Polygon', 'MultiPolygon')]
+                        if polys:
+                            all_polys = []
+                            for p in polys:
+                                if p.geom_type == 'Polygon':
+                                    all_polys.append(p)
+                                else:
+                                    all_polys.extend(list(p.geoms))
+                            areas_dict[name] = MultiPolygon(all_polys)
+                else:
+                    areas_dict[name] = geom
+                    if log_msg:
+                        logger.info(log_msg, name)
+            
             if admin_level == '8':
-                level8_areas[name] = multipolygon
+                add_or_merge(level8_areas, name, multipolygon)
                 ref = record.get('ref')
                 if ref:
                     municipality_refs[name] = str(ref)
             elif admin_level == '7':
-                level7_areas[name] = multipolygon
+                add_or_merge(level7_areas, name, multipolygon)
             elif admin_level == '6':
-                level6_areas[name] = multipolygon
-                logger.info("Built geometry for Level 6 area: %s", name)
+                add_or_merge(level6_areas, name, multipolygon, "Built geometry for Level 6 area: %s")
             elif admin_level == '5':
-                level5_areas[name] = multipolygon
-                logger.info("Built geometry for Level 5 area: %s", name)
+                add_or_merge(level5_areas, name, multipolygon, "Built geometry for Level 5 area: %s")
+            elif admin_level == '4':
+                add_or_merge(level4_areas, name, multipolygon, "Built geometry for Level 4 area: %s")
             elif admin_level == '9':
-                borough_areas[name] = multipolygon
+                add_or_merge(borough_areas, name, multipolygon)
             elif admin_level == '10':
-                suburb_areas[name] = multipolygon
+                add_or_merge(suburb_areas, name, multipolygon)
 
-    return postal_areas, level8_areas, level7_areas, level6_areas, level5_areas, municipality_refs, borough_areas, suburb_areas
+    return postal_areas, level8_areas, level7_areas, level6_areas, level5_areas, level4_areas, municipality_refs, borough_areas, suburb_areas
 
 
 class AreaIndex:
@@ -181,11 +229,17 @@ class AreaIndex:
         if not self.tree:
             return None
 
-        # Query returns geometry indices, not objects
+        # Query returns geometry indices
         try:
-            candidates = self.tree.query(point, predicate='contains')
+            # In Shapely 2.x, use intersects predicate first (more reliable)
+            candidates = self.tree.query(point, predicate='intersects')
         except TypeError:
+            # Older shapely version without predicate parameter
             candidates = self.tree.query(point)
+        except Exception as e:
+            # Some versions might have issues
+            logger.debug(f"STRtree query failed: {e}, falling back to linear search")
+            candidates = range(len(self.geometries))
 
         best_match = None
         min_area = float('inf')
@@ -195,7 +249,7 @@ class AreaIndex:
             idx = int(idx)
             if 0 <= idx < len(self.geometries):
                 geom = self.geometries[idx]
-                # Double-check containment for query() without predicate
+                # Always double-check containment
                 if geom.contains(point):
                     area = geom.area
                     if area < min_area:
@@ -236,6 +290,7 @@ class AreaLookup:
         level7_areas: Dict[str, MultiPolygon],
         level6_areas: Dict[str, MultiPolygon],
         level5_areas: Dict[str, MultiPolygon],
+        level4_areas: Dict[str, MultiPolygon],
         municipality_refs: Dict[str, str],
         borough_areas: Dict[str, MultiPolygon],
         suburb_areas: Dict[str, MultiPolygon],
@@ -245,6 +300,7 @@ class AreaLookup:
         self.level7_index = AreaIndex(level7_areas)
         self.level6_index = AreaIndex(level6_areas)
         self.level5_index = AreaIndex(level5_areas)
+        self.level4_index = AreaIndex(level4_areas)
         self.borough_index = AreaIndex(borough_areas)
         self.suburb_index = AreaIndex(suburb_areas)
         self.municipality_refs = municipality_refs
@@ -253,8 +309,10 @@ class AreaLookup:
         self._borough_to_municipality = self._map_children_to_parent(borough_areas, self.level8_index)
         self._suburb_to_municipality = self._map_children_to_parent(suburb_areas, self.level8_index)
 
-    def lookup(self, point: Point) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    def lookup(self, point: Point) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+        # Only use areas that actually contain the point - no nearest() fallback for cities
         postal = self.postal_index.find(point)
+        # Postal code is the only one where we use nearest as fallback
         if not postal:
             postal, _ = self.postal_index.nearest(point)
 
@@ -262,46 +320,21 @@ class AreaLookup:
         level7 = self.level7_index.find(point)
         level6 = self.level6_index.find(point)
         level5 = self.level5_index.find(point)
+        level4 = self.level4_index.find(point)
         borough = self.borough_index.find(point)
         suburb = self.suburb_index.find(point)
 
-        # Try to find municipality from children if direct lookup fails
-        if not level8 and borough:
-            level8 = self._borough_to_municipality.get(borough)
-        if not level8 and suburb:
-            level8 = self._suburb_to_municipality.get(suburb)
-        
-        # Last resort: use nearest municipality (with reasonable distance limit)
-        # Only if we haven't found a higher-level city (level 5, 6 or 7)
-        if not level8 and not level6 and not level7 and not level5:
-            # Find nearest candidates from all relevant levels
-            l8_name, l8_dist = self.level8_index.nearest(point)
-            l6_name, l6_dist = self.level6_index.nearest(point)
-            l5_name, l5_dist = self.level5_index.nearest(point)
-            l7_name, l7_dist = self.level7_index.nearest(point)
-            
-            # Find the absolute closest match
-            candidates = []
-            if l8_name: candidates.append((l8_dist, l8_name, '8'))
-            if l6_name: candidates.append((l6_dist, l6_name, '6'))
-            if l5_name: candidates.append((l5_dist, l5_name, '5'))
-            if l7_name: candidates.append((l7_dist, l7_name, '7'))
-            
-            if candidates:
-                candidates.sort(key=lambda x: x[0])
-                best_dist, best_name, best_level = candidates[0]
-                
-                if best_level == '8':
-                    level8 = best_name
-                elif best_level == '6':
-                    level6 = best_name
-                elif best_level == '5':
-                    level5 = best_name
-                elif best_level == '7':
-                    level7 = best_name
+        # Try to find municipality from children only if we don't have a higher-level city
+        # Priority: level8 > level6 > level4 > level5 > borough/suburb mapping
+        # (Don't use borough mapping if we already have a city-state/level4)
+        if not level8 and not level6 and not level4 and not level5:
+            if borough:
+                level8 = self._borough_to_municipality.get(borough)
+            if not level8 and suburb:
+                level8 = self._suburb_to_municipality.get(suburb)
 
         regional_key = self.municipality_refs.get(level8) if level8 else None
-        return postal, level8, level7, level6, level5, borough, suburb, regional_key
+        return postal, level8, level7, level6, level5, level4, borough, suburb, regional_key
 
     def _map_children_to_parent(self, areas: Dict[str, MultiPolygon], parent_index: AreaIndex) -> Dict[str, str]:
         mapping: Dict[str, str] = {}
@@ -321,7 +354,7 @@ class AreaLookup:
 class StreetCache:
     """Lazy street ID cache to avoid repeated SELECTs."""
 
-    def __init__(self, session, max_size=100000) -> None:
+    def __init__(self, session, max_size=1000000) -> None:
         self.session = session
         # Cache maps (name, city) -> List[Tuple[id, postal_code]]
         self._cache: OrderedDict[Tuple[str, str], List[Tuple[int, Optional[str]]]] = OrderedDict()
@@ -428,6 +461,10 @@ class StreetStreamingHandler(SimpleHandler):
 
         name = tags.get('name')
         if not name:
+            # Fallback to 'ref' for highways (e.g. A 7, L 328) which often lack a name
+            name = tags.get('ref')
+
+        if not name:
             # logger.debug("Skipping way %s: missing name tag", getattr(way, 'id', None))
             return
 
@@ -457,7 +494,7 @@ class StreetStreamingHandler(SimpleHandler):
             point = Point(mid_lon, mid_lat)
             
             match = self.areas.lookup(point)
-            postal, level8, level7, level6, level5, borough, suburb, regional_key = match
+            postal, level8, level7, level6, level5, level4, borough, suburb, regional_key = match
             
             # Fallback to tags if spatial lookup fails for postal code
             if not postal:
@@ -471,10 +508,11 @@ class StreetStreamingHandler(SimpleHandler):
             # Priority (based on https://wiki.openstreetmap.org/wiki/DE:Grenze):
             # 1. Level 8 (municipalities/Gemeinden) - most specific city/town name
             # 2. Level 6 (counties/Kreise and independent cities/kreisfreie Städte)
-            # 3. Level 5 (administrative regions/Regierungsbezirke) - only in some states
-            # 4. Tags (addr:city, etc.)
-            # 5. Level 7 (associations of municipalities)
-            # 6. Borough/suburb - ONLY as last resort
+            # 3. Level 4 (states/Bundesländer) - e.g., Hamburg, Berlin, Bremen
+            # 4. Level 5 (administrative regions/Regierungsbezirke) - only in some states
+            # 5. Tags (addr:city, etc.)
+            # 6. Level 7 (associations of municipalities)
+            # 7. Borough/suburb - ONLY as last resort
             
             city = None
             
@@ -484,6 +522,9 @@ class StreetStreamingHandler(SimpleHandler):
             # Then Level 6 (counties/independent cities)
             elif level6:
                 city = level6
+            # Then Level 4 (city-states like Hamburg, Berlin, Bremen)
+            elif level4:
+                city = level4
             # Then Level 5 (administrative regions)
             elif level5:
                 city = level5
@@ -715,14 +756,16 @@ class AddressStreamingHandler(SimpleHandler):
         # Only do expensive spatial lookup if no city tag exists or postal code is missing
         if not city or not postal_code:
             point = Point(lon, lat)
-            lookup_postal, level8, level7, level6, level5, borough, suburb, _ = self.areas.lookup(point)
+            lookup_postal, level8, level7, level6, level5, level4, borough, suburb, _ = self.areas.lookup(point)
             # Use city priority (based on https://wiki.openstreetmap.org/wiki/DE:Grenze):
-            # Level 8 (municipalities) > Level 6 (counties/independent cities) > Level 5 (regions) > Level 7
+            # Level 8 (municipalities) > Level 6 (counties/independent cities) > Level 4 (city-states) > Level 5 (regions) > Level 7
             if not city:
                 if level8:
                     city = level8
                 elif level6:
                     city = level6
+                elif level4:
+                    city = level4
                 elif level5:
                     city = level5
                 elif level7:
@@ -990,18 +1033,20 @@ def main() -> None:
         level7_areas,
         level6_areas,
         level5_areas,
+        level4_areas,
         municipality_refs,
         borough_areas,
         suburb_areas,
     ) = _build_geometries(relation_collector.relations, way_collector.ways)
 
     logger.info(
-        "Areas -> postal: %d, L8: %d, L7: %d, L6: %d, L5: %d, boroughs: %d, suburbs: %d",
+        "Areas -> postal: %d, L8: %d, L7: %d, L6: %d, L5: %d, L4: %d, boroughs: %d, suburbs: %d",
         len(postal_areas),
         len(level8_areas),
         len(level7_areas),
         len(level6_areas),
         len(level5_areas),
+        len(level4_areas),
         len(borough_areas),
         len(suburb_areas),
     )
@@ -1012,6 +1057,7 @@ def main() -> None:
         level7_areas,
         level6_areas,
         level5_areas,
+        level4_areas,
         municipality_refs,
         borough_areas,
         suburb_areas,
