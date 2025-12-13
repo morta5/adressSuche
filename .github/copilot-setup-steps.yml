@@ -5,14 +5,14 @@ name: Copilot Setup
 
 # Database download
 database:
-  url: "https://cloud.farshidhakimy.de/s/ScfdTePfPc3oaR6/download"
+  url: "https://cloud.farshidhakimy.de/s/4A82YZZzXtMzkxs/download"
   file: "autocomplete.db"
   description: "SQLite database with ~992,580 street entries for address autocomplete testing"
 
 # Setup commands
 setup:
   - name: "Download database"
-    command: "curl -L -o autocomplete.db 'https://cloud.farshidhakimy.de/s/ScfdTePfPc3oaR6/download'"
+    command: "curl -L -o autocomplete.db 'https://cloud.farshidhakimy.de/s/4A82YZZzXtMzkxs/download'"
   
   - name: "Install dependencies"
     command: "pip install -r requirements.txt"

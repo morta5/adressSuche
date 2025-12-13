@@ -3,11 +3,15 @@
 import asyncio
 import logging
 import math
+import os
 import sqlite3
+from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,11 +31,21 @@ from utils import (
     normalize_compact,
     calculate_fuzzy_score_normalized,
     consonant_key,
+    point_to_segment_distance,
 )
 
 # Constants for search quality thresholds
 HIGH_QUALITY_SCORE_THRESHOLD = 0.7  # Score threshold for early exit optimization
 FUZZY_TRIGRAM_CANDIDATE_LIMIT = 3000  # Max candidates to fetch from trigram search
+
+# Performance tuning constants for stage limits
+TRIGRAM_LIMIT_MULTIPLIER = 15  # Multiplier for trigram search results
+TRIGRAM_MIN_LIMIT = 300  # Minimum results for trigram search
+PHONETIC_LIMIT_MULTIPLIER = 20  # Multiplier for phonetic search results
+PHONETIC_MIN_LIMIT = 100  # Minimum results for phonetic search
+PHONETIC_MAX_LIMIT = 250  # Maximum results for phonetic search
+RERANK_CANDIDATE_MULTIPLIER = 4  # Multiplier for reranking candidate pool
+RERANK_MIN_CANDIDATES = 50  # Minimum candidates for reranking
 
 # Unicode constants for prefix range queries
 UNICODE_MAX_CODEPOINT = 0x10FFFF  # Maximum valid Unicode code point
@@ -117,7 +131,7 @@ _known_cities: set[str] | None = None
 _known_cities_lock = threading.Lock()
 
 
-def _get_known_cities(db_path: str = "./autocomplete.db") -> set[str]:
+def _get_known_cities(db_path: str = "./autocomplete_v2.db") -> set[str]:
     """Load known city names from the database (cached, case-insensitive)."""
     global _known_cities
 
@@ -174,37 +188,46 @@ def _extract_city_from_query(
 
 def _select_fuzzy_trigrams(all_trigrams: list[str]) -> list[str]:
     """Select trigrams for fuzzy matching, avoiding common suffix trigrams.
-    
+
     German street names often end in "straße/strasse" which produces very common
     trigrams (str, tra, ras, ass, sse) that match most of the database. We focus
     on trigrams from the unique part of the name (start and middle).
-    
+
     Args:
         all_trigrams: List of all trigrams from the query
-        
+
     Returns:
         Selected trigrams for OR matching
     """
     # Common suffix trigrams from "strasse", "weg", "platz", etc.
     # These match too many entries and should be avoided
     COMMON_SUFFIX_TRIGRAMS = {
-        '"str"', '"tra"', '"ras"', '"ass"', '"sse"',  # strasse
-        '"weg"', '"pla"', '"lat"', '"atz"',  # weg, platz
-        '"rin"', '"ing"',  # ring
-        '"lle"', '"lee"',  # allee
+        '"str"',
+        '"tra"',
+        '"ras"',
+        '"ass"',
+        '"sse"',  # strasse
+        '"weg"',
+        '"pla"',
+        '"lat"',
+        '"atz"',  # weg, platz
+        '"rin"',
+        '"ing"',  # ring
+        '"lle"',
+        '"lee"',  # allee
     }
-    
+
     # Filter out common suffix trigrams
     filtered = [t for t in all_trigrams if t.lower() not in COMMON_SUFFIX_TRIGRAMS]
-    
+
     # If too many were filtered out, use more from the original
     if len(filtered) < 3 and len(all_trigrams) >= 3:
         # Use first half which is less likely to be common suffixes
         filtered = all_trigrams[: len(all_trigrams) // 2 + 2]
-    
+
     if not filtered:
         filtered = all_trigrams
-    
+
     # Select trigrams focusing on start and middle (where unique name content is)
     if len(filtered) >= TRIGRAM_LONG_THRESHOLD:
         # Long strings: pick from start (idx 0-2) and middle
@@ -239,8 +262,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Check if frontend should be served (controlled by environment variable)
+SERVE_FRONTEND = os.getenv("SERVE_FRONTEND", "false").lower() == "true"
 
-
+# Mount static files from frontend directory
+frontend_path = Path(__file__).parent / "frontend"
+if SERVE_FRONTEND and frontend_path.exists():
+    app.mount("/static", StaticFiles(directory=str(frontend_path)), name="static")
 
 
 @app.on_event("startup")
@@ -250,7 +278,26 @@ async def _on_startup():
 
 @app.get("/")
 async def root():
-    return {"message": "Street Autocomplete API v2", "endpoint": "/autocomplete"}
+    """Serve the homepage."""
+    if not SERVE_FRONTEND:
+        return {"message": "Street Autocomplete API v2", "docs": "/docs"}
+    
+    index_path = frontend_path / "index.html"
+    if index_path.exists():
+        return HTMLResponse(content=index_path.read_text(), status_code=200)
+    return {"message": "Street Autocomplete API v2", "docs": "/docs"}
+
+
+@app.get("/de")
+async def root_de():
+    """Serve the German homepage."""
+    if not SERVE_FRONTEND:
+        return {"message": "Street Autocomplete API v2", "docs": "/docs"}
+    
+    de_path = frontend_path / "de.html"
+    if de_path.exists():
+        return HTMLResponse(content=de_path.read_text(), status_code=200)
+    return {"message": "Street Autocomplete API v2 (DE)", "docs": "/docs"}
 
 
 @app.get("/autocomplete", response_model=List[StreetAutocompleteResponse])
@@ -271,8 +318,14 @@ async def autocomplete(
             city = detected_city
             logger.debug(f"Extracted city '{city}' from query, street query: '{query}'")
 
+    # Cache normalized forms to avoid recalculating
     qc = normalize_compact(query)
     qn = normalize_string(query)
+    qc_lower = qc.lower() if qc else ""
+
+    # Cache phonetic forms for reuse across stages
+    qg_phonetic, qc_phonetic = phonetic_forms(query)
+    q_consonant = consonant_key(query)
 
     # Query expansion (abbr/suffix/hyphen)
     expanded_queries = QueryProcessor.expand_query(query)
@@ -299,10 +352,25 @@ async def autocomplete(
             return prefix + UNICODE_FALLBACK_UPPER  # Fallback for maximum codepoint
 
         # Use UNION of two indexed range queries instead of OR (which causes full scan)
+        # Adaptive limit based on query characteristics and geo coordinates:
+        # With ORDER BY distance in the SQL query, closest results come first,
+        # so we can use much lower limits when geo-coordinates are provided
+        # - With geo + ORDER BY distance: moderate limit (1000) is sufficient
+        # - No geo: small limit for performance
+        if latitude is not None and longitude is not None:
+            # With distance ordering, 1000 is enough even for common names like Hauptstraße
+            is_multiword = ' ' in query.strip()
+            if is_multiword or len(query) >= 10:
+                stage_a_limit = 1000
+            else:
+                stage_a_limit = limit * 8
+        else:
+            stage_a_limit = limit * 4
+        
         params: Dict[str, Any] = {
             "q1_start": query,
             "q1_end": prefix_end(query),
-            "limit": limit * 4,
+            "limit": stage_a_limit,
         }
 
         # Build the SQL with UNION to use index on both queries
@@ -333,6 +401,12 @@ async def autocomplete(
             # Wrap with city filter - explicitly list columns instead of SELECT *
             params["city"] = f"{city}%"
             sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({sql}) WHERE city LIKE :city"
+
+        # Order by distance when geo-coordinates are provided
+        if latitude is not None and longitude is not None:
+            params["user_lat"] = latitude
+            params["user_lon"] = longitude
+            sql += " ORDER BY ((latitude - :user_lat) * (latitude - :user_lat) + (longitude - :user_lon) * (longitude - :user_lon))"
 
         sql += " LIMIT :limit"
 
@@ -375,7 +449,8 @@ async def autocomplete(
     async def trigram_search() -> list[tuple[StreetAutocompleteResponse, float, int]]:
         if len(qc) < 2:
             return []
-        trigram_limit = max(limit * 25, 400)
+        # Use performance tuning constants
+        trigram_limit = max(limit * TRIGRAM_LIMIT_MULTIPLIER, TRIGRAM_MIN_LIMIT)
         params: Dict[str, Any] = {"pattern": f"{qc}*", "limit": trigram_limit}
         sql = [
             "SELECT s.id AS street_id, s.name, s.city, s.postal_code, s.latitude, s.longitude,",
@@ -479,15 +554,17 @@ async def autocomplete(
 
     # Stage D: Phonetic search using precomputed phonetic codes (SIMPLIFIED for speed)
     async def phonetic_stage() -> list[tuple[StreetAutocompleteResponse, float, int]]:
-        qg, qc_ph = phonetic_forms(query)
-        q_cons = consonant_key(query)
+        # Use cached phonetic forms
+        qg = qg_phonetic
+        qc_ph = qc_phonetic
+        q_cons = q_consonant
 
         if not qg and not qc_ph and not q_cons:
             return []
 
-        # Simpler, faster phonetic query - just use index prefix matching
+        # Use performance tuning constants
         params: Dict[str, Any] = {
-            "prelimit": max(100, min(300, limit * 30)),
+            "prelimit": max(PHONETIC_MIN_LIMIT, min(PHONETIC_MAX_LIMIT, limit * PHONETIC_LIMIT_MULTIPLIER)),
         }
 
         where_clauses = []
@@ -608,19 +685,17 @@ async def autocomplete(
         local.sort(key=lambda t: (-t[1], t[0].name, t[0].city))
         return local[: max(limit * 5, 50)]
 
-
-
     # Stage G: Fuzzy trigram search with OR matching for typo tolerance
     async def fuzzy_trigram_search() -> list[
         tuple[StreetAutocompleteResponse, float, int]
     ]:
         """Use trigram OR matching to find candidates with typos.
-        
+
         Strategy: Use OR instead of AND with multiple trigrams from different
         parts of the string. This allows matching even when some trigrams are
         affected by typos. The Levenshtein distance filter then removes false positives.
         """
-        qc_lower = qc.lower() if qc else ""
+        # Use cached normalized form
         if len(qc_lower) < 3:
             return []
 
@@ -721,6 +796,9 @@ async def autocomplete(
     # Run retrieval stages with early exit optimization
     # Fast stages first, skip slow stages if we have enough results
 
+    # Store the original city filter for potential fallback
+    original_city = city
+
     # Stage A: Exact prefix (fast, uses index)
     stage_a = await exact_prefix()
 
@@ -736,6 +814,23 @@ async def autocomplete(
     stage_b = []
     if len(stage_a) < limit:
         stage_b = await trigram_search()
+
+    # If city filter was applied but we got no results, try again without city filter
+    # This handles cases where city name doesn't match exactly in database
+    if original_city and len(stage_a) == 0 and len(stage_b) == 0:
+        logger.debug(f"No results found with city filter '{original_city}', retrying without city filter")
+        city = None  # Temporarily remove city filter
+        stage_a_fallback = await exact_prefix()
+        stage_b_fallback = await trigram_search()
+        # Restore city filter for subsequent stages
+        city = original_city
+        # Merge fallback results (they will be penalized by distance if geo coords provided)
+        stage_a.extend(stage_a_fallback)
+        stage_b.extend(stage_b_fallback)
+        stage_a_has_matches = len(stage_a) > 0
+        stage_a_has_good_match = any(
+            sc >= HIGH_QUALITY_SCORE_THRESHOLD for _, sc, _ in stage_a
+        )
 
     # Early exit check after fast stages
     fast_results = [*stage_a, *stage_b]
@@ -794,8 +889,9 @@ async def autocomplete(
             by_id[sid] = (resp, sc)
 
     # Optional phonetic + normalized fuzzy reranking on top K candidates
+    # Use performance tuning constants for candidate pool size
     top_candidates = sorted(by_id.values(), key=lambda t: t[1], reverse=True)[
-        : max(limit * 8, 100)
+        : max(limit * RERANK_CANDIDATE_MULTIPLIER, RERANK_MIN_CANDIDATES)
     ]
     reranked: list[tuple[StreetAutocompleteResponse, float]] = []
     qn_norm = normalize_string(query)
@@ -894,6 +990,235 @@ async def validate_address(
             return resp
 
     return AddressValidationResponse(exists=False)
+
+
+# Maximum distance in kilometers for reverse geocoding to return a result
+REVERSE_GEOCODE_MAX_DISTANCE_KM = 0.1  # 100 meters
+
+# Optimization: Assume no single street segment spans more than this many degrees of latitude.
+# This allows us to bound the min_lat search, significantly speeding up queries.
+# 0.1 degrees is approx 11km, which is safe for most street segments.
+MAX_SEGMENT_LAT_SPAN = 0.1
+
+
+@app.get("/reverse", response_model=AddressValidationResponse)
+async def reverse_geocode(
+    latitude: float = Query(..., description="Latitude coordinate"),
+    longitude: float = Query(..., description="Longitude coordinate"),
+    max_distance_km: Optional[float] = Query(
+        None, description="Maximum distance in km (default 0.1 km = 100m)"
+    ),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Reverse geocode coordinates to find the nearest address or street.
+
+    First tries to find the nearest house number within the specified distance.
+    If no address is found, falls back to finding the nearest street segment.
+    Returns the coordinates of the closest point on the street.
+
+    If max_distance_km is not provided, it uses an exponential backoff strategy,
+    searching increasingly larger areas (up to 5km) until a match is found.
+
+    Args:
+        latitude: Latitude coordinate to search near
+        longitude: Longitude coordinate to search near
+        max_distance_km: Maximum distance in kilometers (default 0.1 km = 100m)
+
+    Returns:
+        AddressValidationResponse with the nearest address or street if found
+    """
+    # Determine search steps
+    if max_distance_km is not None:
+        search_distances = [max_distance_km]
+    else:
+        # Exponential backoff steps optimized to minimize queries:
+        # 1. Very close (100m) - covers 90% of urban use cases
+        # 2. Medium (1km) - covers most suburban/rural roads
+        # 3. Far (5km) - fallback for remote highways
+        search_distances = [0.1, 1.0, 5.0]
+
+    for dist in search_distances:
+        # Calculate bounding box for filtering
+        # Use a slightly larger radius to account for edge cases
+        search_radius_km = dist * 1.5
+        lat_min, lat_max, lon_min, lon_max = await _geo_bounds(
+            latitude, longitude, search_radius_km
+        )
+
+        params = {
+            "lat_min": lat_min,
+            "lat_max": lat_max,
+            "lon_min": lon_min,
+            "lon_max": lon_max,
+        }
+
+        # First, try to find the nearest address (house number)
+        # Only if dist is small enough to make sense for house numbers (e.g. < 200m)
+        # If we are searching 2km away, we probably just want the street/highway.
+        if dist <= 0.2:
+            address_result = await _find_nearest_address(db, latitude, longitude, params, dist)
+            if address_result:
+                return address_result
+
+        # No address found (or skipped), fall back to finding the nearest street segment
+        street_result = await _find_nearest_street_segment(db, latitude, longitude, params, dist)
+        if street_result:
+            return street_result
+
+    return AddressValidationResponse(exists=False)
+
+
+async def _find_nearest_address(
+    db: AsyncSession,
+    latitude: float,
+    longitude: float,
+    params: dict,
+    max_dist: float
+) -> Optional[AddressValidationResponse]:
+    """Find the nearest address within the bounding box."""
+    sql = """
+        SELECT
+            a.id as address_id,
+            a.street_id,
+            a.house_number,
+            a.latitude as addr_lat,
+            a.longitude as addr_lon,
+            s.name as street_name,
+            s.city,
+            s.postal_code
+        FROM addresses a
+        JOIN streets s ON s.id = a.street_id
+        WHERE a.latitude BETWEEN :lat_min AND :lat_max
+          AND a.longitude BETWEEN :lon_min AND :lon_max
+        LIMIT 1000
+    """
+
+    try:
+        res = await db.execute(text(sql), params)
+        rows = res.fetchall()
+    except Exception:
+        return None
+
+    if not rows:
+        return None
+
+    # Calculate actual haversine distance for each candidate and find the nearest
+    nearest_row = None
+    nearest_distance = float("inf")
+
+    for row in rows:
+        addr_lat = row._mapping["addr_lat"]
+        addr_lon = row._mapping["addr_lon"]
+        distance = haversine_distance(latitude, longitude, addr_lat, addr_lon)
+
+        if distance < nearest_distance:
+            nearest_distance = distance
+            nearest_row = row
+
+    # Check if the nearest address is within the maximum distance threshold
+    if nearest_row is None or nearest_distance > max_dist:
+        return None
+
+    # Build and return the response
+    return AddressValidationResponse(
+        exists=True,
+        address_id=int(nearest_row._mapping["address_id"]),
+        street_name=str(nearest_row._mapping["street_name"]),
+        city=str(nearest_row._mapping["city"]),
+        postal_code=str(nearest_row._mapping["postal_code"])
+        if nearest_row._mapping["postal_code"] is not None
+        else None,
+        house_number=str(nearest_row._mapping["house_number"]),
+        latitude=float(nearest_row._mapping["addr_lat"]),
+        longitude=float(nearest_row._mapping["addr_lon"]),
+        distance_km=round(nearest_distance, 2),
+    )
+
+
+async def _find_nearest_street_segment(
+    db: AsyncSession,
+    latitude: float,
+    longitude: float,
+    params: dict,
+    max_dist: float
+) -> Optional[AddressValidationResponse]:
+    """Find the nearest street segment within the bounding box."""
+    # Query street segments that might be nearby
+    # We check segments whose bounding box overlaps with our search area
+    # Use a spatial index hint if possible, but standard B-Tree on min/max columns works well
+    
+    # Optimization: Add lower bound for min_lat to use the index effectively
+    # This prevents scanning the entire table for segments starting south of the search area
+    params["min_lat_lower"] = params["lat_min"] - MAX_SEGMENT_LAT_SPAN
+
+    sql = """
+        SELECT
+            seg.id as segment_id,
+            seg.street_id,
+            seg.start_lat,
+            seg.start_lon,
+            seg.end_lat,
+            seg.end_lon,
+            s.name as street_name,
+            s.city,
+            s.postal_code
+        FROM street_segments seg
+        JOIN streets s ON s.id = seg.street_id
+        WHERE seg.max_lat >= :lat_min AND seg.min_lat <= :lat_max
+          AND seg.min_lat >= :min_lat_lower
+          AND seg.max_lon >= :lon_min AND seg.min_lon <= :lon_max
+    """
+
+    try:
+        res = await db.execute(text(sql), params)
+        rows = res.fetchall()
+    except Exception:
+        return None
+
+    if not rows:
+        return None
+
+    # Calculate distance from point to each segment and find the nearest
+    nearest_row = None
+    nearest_distance = float("inf")
+    nearest_point_lat = 0.0
+    nearest_point_lon = 0.0
+
+    for row in rows:
+        start_lat = row._mapping["start_lat"]
+        start_lon = row._mapping["start_lon"]
+        end_lat = row._mapping["end_lat"]
+        end_lon = row._mapping["end_lon"]
+
+        distance, closest_lat, closest_lon = point_to_segment_distance(
+            latitude, longitude, start_lat, start_lon, end_lat, end_lon
+        )
+
+        if distance < nearest_distance:
+            nearest_distance = distance
+            nearest_row = row
+            nearest_point_lat = closest_lat
+            nearest_point_lon = closest_lon
+
+    # Check if the nearest segment is within the maximum distance threshold
+    if nearest_row is None or nearest_distance > max_dist:
+        return None
+
+    # Build and return the response (without house_number since this is just a street)
+    return AddressValidationResponse(
+        exists=True,
+        address_id=None,  # No address, just a street
+        street_name=str(nearest_row._mapping["street_name"]),
+        city=str(nearest_row._mapping["city"]),
+        postal_code=str(nearest_row._mapping["postal_code"])
+        if nearest_row._mapping["postal_code"] is not None
+        else None,
+        house_number=None,  # No house number for street-only match
+        latitude=round(nearest_point_lat, 6),  # Closest point on the street
+        longitude=round(nearest_point_lon, 6),
+        distance_km=round(nearest_distance, 2),
+    )
 
 
 def _to_response(

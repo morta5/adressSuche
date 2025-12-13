@@ -80,7 +80,7 @@ alembic/versions/*.pyo
 fuzzy_index/
 germany-latest.osm.pbf
 debug_lookup.py
-.gitignore
-.gitignore
 check_segments.py
 Adressen_Schleswig_Holstein_4307103196373793658.csv
+*.db
+wget-log

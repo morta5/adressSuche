@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Free German address autocomplete API with fuzzy search, typo tolerance, and reverse geocoding. Open-source, high-performance address validation for developers.">
+    <meta name="keywords" content="address autocomplete, german addresses, geocoding api, reverse geocoding, address validation, open source, fastapi, typo tolerance, fuzzy search">
+    <meta name="author" content="adressSuche">
+    <meta property="og:title" content="Address Autocomplete API - German Address Search & Geocoding">
+    <meta property="og:description" content="Free, open-source German address autocomplete API with intelligent search, typo tolerance, and reverse geocoding.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://adresssuche.toyumobility.de/">
+    <link rel="canonical" href="https://adresssuche.toyumobility.de/">
+    <link rel="alternate" hreflang="en" href="https://adresssuche.toyumobility.de/">
+    <link rel="alternate" hreflang="de" href="https://adresssuche.toyumobility.de/de">
+    <link rel="alternate" hreflang="x-default" href="https://adresssuche.toyumobility.de/">
+    <title>Address Autocomplete API - German Address Search & Geocoding | Open Source</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>">
+    <!-- Leaflet CSS for interactive map -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary-color: #4CAF50;
+            --secondary-color: #2196F3;
+            --dark-bg: #1a1a1a;
+            --light-bg: #f5f5f5;
+            --text-dark: #333;
+            --text-light: #666;
+            --border-color: #ddd;
+            --shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.15);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-dark);
+            background: var(--light-bg);
+        }
+
+        /* Header / Hero Section */
+        .hero {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: white;
+            padding: 60px 20px;
+            text-align: center;
+            position: relative;
+        }
+
+        .hero h1 {
+            font-size: 2.5em;
+            margin-bottom: 20px;
+            font-weight: 700;
+        }
+
+        .hero p {
+            font-size: 1.2em;
+            max-width: 800px;
+            margin: 0 auto 30px;
+            opacity: 0.95;
+        }
+
+        .hero-buttons {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 12px 30px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            border: 2px solid transparent;
+        }
+
+        .btn-primary {
+            background: white;
+            color: var(--primary-color);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .btn-outline {
+            border-color: white;
+            color: white;
+            background: transparent;
+        }
+
+        .btn-outline:hover {
+            background: white;
+            color: var(--primary-color);
+        }
+
+        /* Container */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        /* Features Section */
+        .features {
+            padding: 60px 20px;
+            background: white;
+        }
+
+        .features h2 {
+            text-align: center;
+            font-size: 2em;
+            margin-bottom: 40px;
+            color: var(--text-dark);
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+
+        .feature-card {
+            padding: 30px;
+            background: var(--light-bg);
+            border-radius: 8px;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .feature-card h3 {
+            font-size: 1.3em;
+            margin-bottom: 15px;
+            color: var(--primary-color);
+        }
+
+        .feature-card p {
+            color: var(--text-light);
+            line-height: 1.8;
+        }
+
+        /* Demo Section */
+        .demo {
+            padding: 60px 20px;
+            background: var(--light-bg);
+        }
+
+        .demo h2 {
+            text-align: center;
+            font-size: 2em;
+            margin-bottom: 40px;
+        }
+
+        .demo-tabs {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+
+        .demo-tab {
+            padding: 12px 24px;
+            background: white;
+            border: 2px solid var(--border-color);
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .demo-tab:hover {
+            border-color: var(--primary-color);
+            color: var(--primary-color);
+        }
+
+        .demo-tab.active {
+            background: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+        }
+
+        .demo-content {
+            display: none;
+        }
+
+        .demo-content.active {
+            display: block;
+        }
+
+        .demo-panel {
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--text-dark);
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 16px;
+            transition: border-color 0.3s ease;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .btn-demo {
+            width: 100%;
+            padding: 14px;
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.3s ease;
+        }
+
+        .btn-demo:hover {
+            background: #45a049;
+        }
+
+        .btn-demo:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .result-box {
+            margin-top: 20px;
+            padding: 20px;
+            background: var(--light-bg);
+            border-radius: 6px;
+            border-left: 4px solid var(--primary-color);
+            display: none;
+        }
+
+        .result-box.show {
+            display: block;
+        }
+
+        .result-box h4 {
+            margin-bottom: 10px;
+            color: var(--primary-color);
+        }
+
+        .result-box pre {
+            background: #f9f9f9;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 14px;
+        }
+
+        .result-list {
+            list-style: none;
+        }
+
+        .result-item {
+            padding: 12px;
+            margin-bottom: 10px;
+            background: white;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+        }
+
+        .result-item strong {
+            color: var(--primary-color);
+        }
+
+        /* Stats Section */
+        .stats {
+            padding: 60px 20px;
+            background: white;
+            text-align: center;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 30px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .stat-card {
+            padding: 20px;
+        }
+
+        .stat-number {
+            font-size: 3em;
+            font-weight: 700;
+            color: var(--primary-color);
+            line-height: 1;
+            margin-bottom: 10px;
+        }
+
+        .stat-label {
+            font-size: 1.1em;
+            color: var(--text-light);
+        }
+
+        /* Footer */
+        .footer {
+            background: var(--dark-bg);
+            color: #ccc;
+            padding: 40px 20px;
+            text-align: center;
+        }
+
+        .footer a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+
+        .footer-links {
+            margin: 20px 0;
+        }
+
+        .footer-links a {
+            margin: 0 15px;
+        }
+
+        .attribution {
+            margin-top: 20px;
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+
+        /* GitHub Star Banner */
+        .github-banner {
+            background: linear-gradient(135deg, #24292e 0%, #1a1e22 100%);
+            color: white;
+            padding: 16px 20px;
+            text-align: center;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .github-banner-content {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .github-banner-text {
+            font-size: 1em;
+            font-weight: 500;
+        }
+
+        .github-star-button {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 20px;
+            background: #ffd33d;
+            color: #24292e;
+            border-radius: 6px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            border: none;
+            cursor: pointer;
+        }
+
+        .github-star-button:hover {
+            background: #f7c621;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(255, 211, 61, 0.4);
+        }
+
+        .github-star-icon {
+            font-size: 1.2em;
+        }
+
+
+
+        /* Language Switcher */
+        .language-switcher {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            gap: 10px;
+            background: rgba(255, 255, 255, 0.2);
+            padding: 8px;
+            border-radius: 6px;
+            backdrop-filter: blur(10px);
+        }
+
+        .language-switcher a {
+            padding: 6px 12px;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            font-weight: 600;
+            transition: background 0.3s ease;
+            font-size: 0.9em;
+        }
+
+        .language-switcher a:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .language-switcher a.active {
+            background: rgba(255, 255, 255, 0.4);
+        }
+
+        /* Loading Spinner */
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid var(--primary-color);
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+            display: none;
+        }
+
+        .spinner.show {
+            display: block;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Map placeholder */
+        .map-placeholder {
+            width: 100%;
+            height: 300px;
+            background: #e0e0e0;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #999;
+            font-size: 1.2em;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <!-- GitHub Star Banner -->
+    <div class="github-banner" id="github-banner">
+        <div class="github-banner-content">
+            <span class="github-banner-text">⭐ Love this project? Give us a star on GitHub!</span>
+            <a href="https://github.com/morta5/adressSuche" target="_blank" class="github-star-button">
+                <span>Star on GitHub</span>
+            </a>
+        </div>
+    </div>
+
+    <!-- Hero Section -->
+    <div class="hero">
+        <div class="language-switcher">
+            <a href="/" class="active">EN</a>
+            <a href="/de">DE</a>
+        </div>
+        <div class="container">
+            <h1>🏠 Address Autocomplete API</h1>
+            <p>High-performance, open-source German address search with intelligent fuzzy matching, typo tolerance, and reverse geocoding. Free to use for developers.</p>
+            <div class="hero-buttons">
+                <a href="#demo" class="btn btn-primary">Try Live Demo</a>
+                <a href="https://github.com/morta5/adressSuche" target="_blank" class="btn btn-outline">View on GitHub</a>
+                <a href="/docs" class="btn btn-outline">API Docs</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Features Section -->
+    <div class="features">
+        <div class="container">
+            <h2>✨ Key Features</h2>
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <h3>🔍 Intelligent Search</h3>
+                    <p>Multi-stage retrieval with exact matching, trigram FTS, and phonetic search. Automatically handles German abbreviations and city detection.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>⚡ Lightning Fast</h3>
+                    <p>Typically &lt;50ms for exact queries, &lt;300ms for complex fuzzy searches. Optimized database indexes and caching for maximum performance.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>🎯 Typo Tolerance</h3>
+                    <p>Finds addresses even with spelling mistakes. "Kiler Straße" finds "Kieler Straße" automatically using Levenshtein distance and phonetic matching.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>📍 Reverse Geocoding</h3>
+                    <p>Convert coordinates to addresses. Finds the nearest house number or street segment with configurable search radius.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>✅ Address Validation</h3>
+                    <p>Validate street names and house numbers. Get exact coordinates for validated addresses with distance calculations.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>🌐 Open Source</h3>
+                    <p>AGPLv3 licensed. Free to use, modify, and distribute. Built with FastAPI, SQLite, and modern web technologies.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Stats Section -->
+    <div class="stats">
+        <div class="container">
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-number">~50ms</div>
+                    <div class="stat-label">Typical Response Time</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">100%</div>
+                    <div class="stat-label">Open Source</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">3</div>
+                    <div class="stat-label">API Endpoints</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Demo Section -->
+    <div class="demo" id="demo">
+        <div class="container">
+            <h2>🎮 Interactive Demo</h2>
+            
+            <!-- Interactive Map -->
+            <div id="demo-map" style="width: 100%; height: 400px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);"></div>
+            <p style="text-align: center; color: #666; margin-bottom: 30px;"><small>💡 Click anywhere on the map to automatically look up the address at that location</small></p>
+            
+            <div class="demo-tabs">
+                <div class="demo-tab active" data-tab="autocomplete">Address Search</div>
+                <div class="demo-tab" data-tab="validate">Address Validation</div>
+                <div class="demo-tab" data-tab="reverse">Reverse Geocoding</div>
+            </div>
+
+            <!-- Autocomplete Demo -->
+            <div class="demo-content active" id="autocomplete-demo">
+                <div class="demo-panel">
+                    <h3>🔍 Address Autocomplete</h3>
+                    <p>Search for street names with intelligent fuzzy matching and typo tolerance.</p>
+                    
+                    <form id="autocomplete-form" style="margin-top: 30px;">
+                        <div class="form-group">
+                            <label for="search-query">Search Query</label>
+                            <input type="text" id="search-query" placeholder="e.g., Hauptstraße, Kieler Str Berlin, banhofstrasse (typo)" autocomplete="off">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="search-city">City (optional)</label>
+                                <input type="text" id="search-city" placeholder="e.g., Hamburg">
+                            </div>
+                            <div class="form-group">
+                                <label for="search-limit">Limit</label>
+                                <input type="number" id="search-limit" value="10" min="1" max="100">
+                            </div>
+                        </div>
+                        <button type="button" id="autocomplete-validate-button" class="btn-demo">Validate</button>
+                    </form>
+
+                    <div class="spinner" id="autocomplete-spinner"></div>
+                    <div class="result-box" id="autocomplete-results">
+                        <h4>Results:</h4>
+                        <ul class="result-list" id="autocomplete-list"></ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Validate Demo -->
+            <div class="demo-content" id="validate-demo">
+                <div class="demo-panel">
+                    <h3>✅ Address Validation</h3>
+                    <p>Validate if a specific street and house number combination exists.</p>
+                    
+                    <form id="validate-form" style="margin-top: 30px;">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="validate-street">Street Name</label>
+                                <input type="text" id="validate-street" placeholder="e.g., Hauptstraße" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="validate-number">House Number</label>
+                                <input type="text" id="validate-number" placeholder="e.g., 42" required>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="validate-city">City (optional)</label>
+                            <input type="text" id="validate-city" placeholder="e.g., Hamburg">
+                        </div>
+                        <button type="submit" class="btn-demo">Validate Address</button>
+                    </form>
+
+                    <div class="spinner" id="validate-spinner"></div>
+                    <div class="result-box" id="validate-results">
+                        <h4>Validation Result:</h4>
+                        <div id="validate-output"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Reverse Demo -->
+            <div class="demo-content" id="reverse-demo">
+                <div class="demo-panel">
+                    <h3>📍 Reverse Geocoding</h3>
+                    <p>Find the nearest address or street from geographic coordinates.</p>
+                    
+                    <form id="reverse-form" style="margin-top: 30px;">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="reverse-lat">Latitude</label>
+                                <input type="number" id="reverse-lat" placeholder="e.g., 53.5511" step="0.000001" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="reverse-lon">Longitude</label>
+                                <input type="number" id="reverse-lon" placeholder="e.g., 9.9937" step="0.000001" required>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="reverse-distance">Max Distance (km)</label>
+                            <input type="number" id="reverse-distance" placeholder="0.1 (default)" step="0.1" min="0.01">
+                        </div>
+                        <button type="submit" class="btn-demo">Find Address</button>
+                        <button type="button" class="btn-demo" style="background: var(--secondary-color); margin-top: 10px;" onclick="getUserLocation()">Use My Location</button>
+                    </form>
+
+                    <div class="spinner" id="reverse-spinner"></div>
+                    <div class="result-box" id="reverse-results">
+                        <h4>Reverse Geocoding Result:</h4>
+                        <div id="reverse-output"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+        <div class="container">
+            <p>&copy; 2025 Farshid Hakimy | Licensed under <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" style="color: var(--primary-color);">GNU AGPLv3</a></p>
+            <div class="footer-links">
+                <a href="https://github.com/morta5/adressSuche" target="_blank">GitHub</a>
+                <a href="/docs">API Documentation</a>
+                <a href="https://github.com/morta5/adressSuche/issues" target="_blank">Report Issue</a>
+            </div>
+            <div class="attribution">
+                Data Sources: <a href="https://arcg.is/0nXTyK" target="_blank">Esri Deutschland (CC BY 4.0)</a> | 
+                <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap (ODbL)</a>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script src="/static/address-autocomplete.js"></script>
+    <script>
+        // Tab switching
+        document.querySelectorAll('.demo-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabName = tab.getAttribute('data-tab');
+                
+                // Update tabs
+                document.querySelectorAll('.demo-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                
+                // Update content
+                document.querySelectorAll('.demo-content').forEach(c => c.classList.remove('active'));
+                document.getElementById(`${tabName}-demo`).classList.add('active');
+            });
+        });
+
+        // API Base URL - auto-detect
+        const API_URL = window.location.origin;
+
+        // Demo map integration (Leaflet)
+        let demoMap = null;
+        let demoMarker = null;
+
+        function initDemoMap() {
+            if (typeof L === 'undefined') return;
+            if (demoMap) return;
+            demoMap = L.map('demo-map', { zoomControl: true }).setView([51.1657, 10.4515], 6);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a> contributors'
+            }).addTo(demoMap);
+            
+            // Add click handler for reverse geocoding - automatically lookup address
+            demoMap.on('click', async function(e) {
+                const lat = e.latlng.lat.toFixed(6);
+                const lon = e.latlng.lng.toFixed(6);
+                
+                // Update reverse geocoding form inputs
+                document.getElementById('reverse-lat').value = lat;
+                document.getElementById('reverse-lon').value = lon;
+                
+                // Switch to reverse geocoding tab
+                document.querySelector('[data-tab="reverse"]').click();
+                
+                // Show temporary marker with loading state
+                setMapMarker(lat, lon, `<strong>Searching...</strong><br>Lat: ${lat}, Lon: ${lon}`);
+                
+                // Automatically trigger reverse geocoding
+                const spinner = document.getElementById('reverse-spinner');
+                const results = document.getElementById('reverse-results');
+                const output = document.getElementById('reverse-output');
+                
+                spinner.classList.add('show');
+                results.classList.remove('show');
+                
+                try {
+                    const params = new URLSearchParams({ 
+                        latitude: lat, 
+                        longitude: lon 
+                    });
+                    const distance = document.getElementById('reverse-distance').value;
+                    if (distance) params.append('max_distance_km', distance);
+                    
+                    const response = await fetch(`${API_URL}/reverse?${params}`);
+                    const data = await response.json();
+                    
+                    spinner.classList.remove('show');
+                    results.classList.add('show');
+                    
+                    if (data.exists) {
+                        output.innerHTML = `
+                            <div style="color: green; font-weight: bold; margin-bottom: 15px;">✅ Address Found!</div>
+                            <pre>${JSON.stringify(data, null, 2)}</pre>
+                        `;
+                        if (data.latitude && data.longitude) {
+                            setMapMarker(data.latitude, data.longitude, `<strong>${data.street_name || ''} ${data.house_number || ''}</strong><br>${data.postal_code || ''} ${data.city || ''}`);
+                        }
+                    } else {
+                        output.innerHTML = `
+                            <div style="color: orange; font-weight: bold;">⚠️ No Address Found Within Search Radius</div>
+                        `;
+                        setMapMarker(lat, lon, `<strong>Search Location</strong><br>No address found here`);
+                    }
+                } catch (error) {
+                    spinner.classList.remove('show');
+                    results.classList.add('show');
+                    output.innerHTML = `<div style="color: red;">Error: ${error.message}</div>`;
+                    setMapMarker(lat, lon, `<strong>Error</strong><br>${error.message}`);
+                }
+            });
+        }
+
+        function setMapMarker(lat, lon, popupHtml) {
+            if (!lat || !lon) return;
+            initDemoMap();
+            try {
+                if (demoMarker) {
+                    demoMarker.setLatLng([lat, lon]);
+                } else {
+                    demoMarker = L.marker([lat, lon]).addTo(demoMap);
+                }
+                if (popupHtml) {
+                    demoMarker.bindPopup(popupHtml).openPopup();
+                }
+                demoMap.setView([lat, lon], 13);
+            } catch (e) {
+                // Leaflet might not be available; ignore
+                console.warn('Map marker update failed', e);
+            }
+        }
+
+        function clearMapMarker() {
+            if (demoMap && demoMarker) {
+                demoMap.removeLayer(demoMarker);
+                demoMarker = null;
+            }
+        }
+        // Initialize map early so users can see it without an immediate marker
+        initDemoMap();
+
+        // Autocomplete Search - use AddressAutocomplete library
+        // Create instance for the demo input
+        const autocompleteSearch = new AddressAutocomplete({
+            input: '#search-query',
+            apiUrl: API_URL,
+            validateOnComplete: true, // Don't auto-validate on selection, use manual validation button
+            debounceMs: 150,
+            minChars: 1,
+            maxSuggestions: parseInt(document.getElementById('search-limit').value || 10, 10),
+            defaultCity: document.getElementById('search-city').value || null,
+            // When an address is selected, display it in the results panel
+            onComplete: (address) => {
+                const results = document.getElementById('autocomplete-results');
+                const list = document.getElementById('autocomplete-list');
+                results.classList.add('show');
+                // Map the selected suggestion into a single highlighted item
+                list.innerHTML = `<li class="result-item"><strong>${address.street}</strong> - ${address.city || 'N/A'} (${address.postcode || 'N/A'})<br><small>Distance: ${address.distanceKm ? address.distanceKm + ' km' : 'N/A'}</small></li>`;
+                // Update map marker
+                if (address.latitude && address.longitude) {
+                    setMapMarker(address.latitude, address.longitude, `<strong>${address.street}</strong><br>${address.postcode || ''} ${address.city || ''}`);
+                }
+            },
+            onValidate: (validation) => {
+                // Show validation result when user clicks Validate button
+                const results = document.getElementById('autocomplete-results');
+                const list = document.getElementById('autocomplete-list');
+                const spinner = document.getElementById('autocomplete-spinner');
+                spinner.classList.remove('show');
+                results.classList.add('show');
+                if (validation.exists) {
+                    list.innerHTML = `<li class="result-item" style="color: green; border-left: 4px solid green;"><strong>✅ Validated:</strong> ${validation.street} ${validation.housenumber || ''}<br>${validation.postcode || ''} ${validation.city || ''}</li>`;
+                    if (validation.latitude && validation.longitude) {
+                        setMapMarker(validation.latitude, validation.longitude, `<strong>${validation.street} ${validation.housenumber || ''}</strong><br>${validation.postcode || ''} ${validation.city || ''}`);
+                    }
+                } else {
+                    list.innerHTML = `<li class="result-item" style="color: red; border-left: 4px solid red;"><strong>❌ Not Found:</strong> Address could not be validated</li>`;
+                }
+            }
+        });
+
+        // Update library config when the city or limit inputs change
+        document.getElementById('search-limit').addEventListener('change', (e) => {
+            const v = parseInt(e.target.value || 10, 10);
+            autocompleteSearch.updateConfig({ maxSuggestions: v });
+        });
+        document.getElementById('search-city').addEventListener('input', (e) => {
+            const v = e.target.value?.trim() || null;
+            autocompleteSearch.updateConfig({ defaultCity: v });
+        });
+
+        // Address Validation - reuse AddressAutocomplete validation helper
+        const validateAutocomplete = new AddressAutocomplete({
+            inputs: {
+                street: '#validate-street',
+                housenumber: '#validate-number',
+                city: '#validate-city'
+            },
+            apiUrl: API_URL,
+            validateOnComplete: true,
+            // Pass validation callback to display results
+            onValidate: function(validationResult) {
+                const spinner = document.getElementById('validate-spinner');
+                const results = document.getElementById('validate-results');
+                const output = document.getElementById('validate-output');
+                spinner.classList.remove('show');
+                results.classList.add('show');
+                if (validationResult.exists) {
+                    const details = `
+                        <div style="color: green; font-weight: bold; margin-bottom: 15px; font-size: 1.1em;">✅ Address Validated Successfully!</div>
+                        <div style="background: #f0f9f0; padding: 20px; border-radius: 6px; border-left: 4px solid #4CAF50;">
+                            <div style="margin-bottom: 15px;">
+                                <strong style="color: #2e7d32; display: block; margin-bottom: 5px;">📍 Full Address:</strong>
+                                <div style="font-size: 1.1em; color: #333;">
+                                    ${validationResult.street || ''} ${validationResult.housenumber || validationResult.house_number || ''}<br>
+                                    ${validationResult.postal_code || validationResult.postcode || ''} ${validationResult.city || ''}
+                                </div>
+                            </div>
+                            ${validationResult.latitude && validationResult.longitude ? `
+                            <div style="margin-bottom: 15px;">
+                                <strong style="color: #2e7d32; display: block; margin-bottom: 5px;">🌍 Coordinates:</strong>
+                                <div style="font-family: monospace; color: #555;">
+                                    Latitude: ${validationResult.latitude.toFixed(6)}<br>
+                                    Longitude: ${validationResult.longitude.toFixed(6)}
+                                </div>
+                            </div>
+                            ` : ''}
+                            ${validationResult.distance_km !== undefined && validationResult.distance_km !== null ? `
+                            <div style="margin-bottom: 15px;">
+                                <strong style="color: #2e7d32; display: block; margin-bottom: 5px;">📏 Distance:</strong>
+                                <div style="color: #555;">${validationResult.distance_km.toFixed(2)} km from search origin</div>
+                            </div>
+                            ` : ''}
+                            <details style="margin-top: 15px;">
+                                <summary style="cursor: pointer; color: #1976d2; font-weight: 600;">🔍 View Raw JSON Response</summary>
+                                <pre style="background: white; padding: 10px; border-radius: 4px; margin-top: 10px; overflow-x: auto;">${JSON.stringify(validationResult, null, 2)}</pre>
+                            </details>
+                        </div>
+                    `;
+                    output.innerHTML = details;
+                    if (validationResult.latitude && validationResult.longitude) {
+                        setMapMarker(validationResult.latitude, validationResult.longitude, `<strong>${validationResult.street} ${validationResult.housenumber || validationResult.house_number || ''}</strong><br>${validationResult.postal_code || validationResult.postcode || ''} ${validationResult.city || ''}`);
+                    }
+                } else {
+                    output.innerHTML = `
+                        <div style="background: #ffebee; padding: 20px; border-radius: 6px; border-left: 4px solid #f44336;">
+                            <div style="color: #c62828; font-weight: bold; font-size: 1.1em; margin-bottom: 10px;">❌ Address Not Found</div>
+                            <div style="color: #666;">The address you entered could not be validated. Please check:</div>
+                            <ul style="margin: 10px 0; padding-left: 20px; color: #666;">
+                                <li>Street name spelling</li>
+                                <li>House number accuracy</li>
+                                <li>City name (if provided)</li>
+                            </ul>
+                        </div>
+                    `;
+                }
+            }
+        });
+
+        document.getElementById('validate-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const spinner = document.getElementById('validate-spinner');
+            spinner.classList.add('show');
+            try {
+                // Use the library's complete() method which internally validates
+                await validateAutocomplete.complete();
+            } catch (error) {
+                const results = document.getElementById('validate-results');
+                const output = document.getElementById('validate-output');
+                spinner.classList.remove('show');
+                results.classList.add('show');
+                output.innerHTML = `<div style="color: red;">Error: ${error.message}</div>`;
+            } finally {
+                spinner.classList.remove('show');
+            }
+        });
+
+        // Autocomplete validate button - triggers manual validation of entered address
+        document.getElementById('autocomplete-validate-button').addEventListener('click', async (e) => {
+            e.preventDefault();
+            const spinner = document.getElementById('autocomplete-spinner');
+            spinner.classList.add('show');
+            try {
+                // This will parse the input and validate it via the API
+                await autocompleteSearch.complete();
+            } catch (err) {
+                console.error('Validation via autocomplete failed', err);
+                const results = document.getElementById('autocomplete-results');
+                const list = document.getElementById('autocomplete-list');
+                results.classList.add('show');
+                list.innerHTML = `<li class="result-item" style="color: red;">Error: ${err.message}</li>`;
+            } finally {
+                spinner.classList.remove('show');
+            }
+        });
+
+        // Reverse Geocoding
+        document.getElementById('reverse-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const lat = document.getElementById('reverse-lat').value;
+            const lon = document.getElementById('reverse-lon').value;
+            const distance = document.getElementById('reverse-distance').value;
+            
+            const spinner = document.getElementById('reverse-spinner');
+            const results = document.getElementById('reverse-results');
+            const output = document.getElementById('reverse-output');
+            
+            spinner.classList.add('show');
+            results.classList.remove('show');
+            
+            try {
+                const params = new URLSearchParams({ 
+                    latitude: lat, 
+                    longitude: lon 
+                });
+                if (distance) params.append('max_distance_km', distance);
+                
+                const response = await fetch(`${API_URL}/reverse?${params}`);
+                const data = await response.json();
+                
+                spinner.classList.remove('show');
+                results.classList.add('show');
+                
+                if (data.exists) {
+                    output.innerHTML = `
+                        <div style="color: green; font-weight: bold; margin-bottom: 15px;">✅ Address Found!</div>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                    if (data.latitude && data.longitude) {
+                        setMapMarker(data.latitude, data.longitude, `<strong>${data.street_name || ''} ${data.house_number || ''}</strong><br>${data.postal_code || ''} ${data.city || ''}`);
+                    }
+                } else {
+                    output.innerHTML = `
+                        <div style="color: orange; font-weight: bold;">⚠️ No Address Found Within Search Radius</div>
+                    `;
+                    // Still show the searched location on the map
+                    const searchLat = parseFloat(document.getElementById('reverse-lat').value);
+                    const searchLon = parseFloat(document.getElementById('reverse-lon').value);
+                    if (searchLat && searchLon) {
+                        setMapMarker(searchLat, searchLon, `<strong>Search Location</strong><br>No address found here`);
+                    }
+                }
+            } catch (error) {
+                spinner.classList.remove('show');
+                results.classList.add('show');
+                output.innerHTML = `<div style="color: red;">Error: ${error.message}</div>`;
+            }
+        });
+
+        // Get user location
+        function getUserLocation() {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition((position) => {
+                    document.getElementById('reverse-lat').value = position.coords.latitude.toFixed(6);
+                    document.getElementById('reverse-lon').value = position.coords.longitude.toFixed(6);
+                }, (error) => {
+                    alert('Error getting location: ' + error.message);
+                });
+            } else {
+                alert('Geolocation is not supported by your browser');
+            }
+        }
+    </script>
+</body>
+</html>
