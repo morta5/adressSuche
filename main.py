@@ -3,11 +3,15 @@
 import asyncio
 import logging
 import math
+import os
 import sqlite3
+from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +37,15 @@ from utils import (
 # Constants for search quality thresholds
 HIGH_QUALITY_SCORE_THRESHOLD = 0.7  # Score threshold for early exit optimization
 FUZZY_TRIGRAM_CANDIDATE_LIMIT = 3000  # Max candidates to fetch from trigram search
+
+# Performance tuning constants for stage limits
+TRIGRAM_LIMIT_MULTIPLIER = 15  # Multiplier for trigram search results
+TRIGRAM_MIN_LIMIT = 300  # Minimum results for trigram search
+PHONETIC_LIMIT_MULTIPLIER = 20  # Multiplier for phonetic search results
+PHONETIC_MIN_LIMIT = 100  # Minimum results for phonetic search
+PHONETIC_MAX_LIMIT = 250  # Maximum results for phonetic search
+RERANK_CANDIDATE_MULTIPLIER = 4  # Multiplier for reranking candidate pool
+RERANK_MIN_CANDIDATES = 50  # Minimum candidates for reranking
 
 # Unicode constants for prefix range queries
 UNICODE_MAX_CODEPOINT = 0x10FFFF  # Maximum valid Unicode code point
@@ -118,7 +131,7 @@ _known_cities: set[str] | None = None
 _known_cities_lock = threading.Lock()
 
 
-def _get_known_cities(db_path: str = "./autocomplete.db") -> set[str]:
+def _get_known_cities(db_path: str = "./autocomplete_v2.db") -> set[str]:
     """Load known city names from the database (cached, case-insensitive)."""
     global _known_cities
 
@@ -249,6 +262,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Check if frontend should be served (controlled by environment variable)
+SERVE_FRONTEND = os.getenv("SERVE_FRONTEND", "false").lower() == "true"
+
+# Mount static files from frontend directory
+frontend_path = Path(__file__).parent / "frontend"
+if SERVE_FRONTEND and frontend_path.exists():
+    app.mount("/static", StaticFiles(directory=str(frontend_path)), name="static")
+
 
 @app.on_event("startup")
 async def _on_startup():
@@ -257,7 +278,26 @@ async def _on_startup():
 
 @app.get("/")
 async def root():
-    return {"message": "Street Autocomplete API v2", "endpoint": "/autocomplete"}
+    """Serve the homepage."""
+    if not SERVE_FRONTEND:
+        return {"message": "Street Autocomplete API v2", "docs": "/docs"}
+    
+    index_path = frontend_path / "index.html"
+    if index_path.exists():
+        return HTMLResponse(content=index_path.read_text(), status_code=200)
+    return {"message": "Street Autocomplete API v2", "docs": "/docs"}
+
+
+@app.get("/de")
+async def root_de():
+    """Serve the German homepage."""
+    if not SERVE_FRONTEND:
+        return {"message": "Street Autocomplete API v2", "docs": "/docs"}
+    
+    de_path = frontend_path / "de.html"
+    if de_path.exists():
+        return HTMLResponse(content=de_path.read_text(), status_code=200)
+    return {"message": "Street Autocomplete API v2 (DE)", "docs": "/docs"}
 
 
 @app.get("/autocomplete", response_model=List[StreetAutocompleteResponse])
@@ -278,8 +318,14 @@ async def autocomplete(
             city = detected_city
             logger.debug(f"Extracted city '{city}' from query, street query: '{query}'")
 
+    # Cache normalized forms to avoid recalculating
     qc = normalize_compact(query)
     qn = normalize_string(query)
+    qc_lower = qc.lower() if qc else ""
+
+    # Cache phonetic forms for reuse across stages
+    qg_phonetic, qc_phonetic = phonetic_forms(query)
+    q_consonant = consonant_key(query)
 
     # Query expansion (abbr/suffix/hyphen)
     expanded_queries = QueryProcessor.expand_query(query)
@@ -306,10 +352,25 @@ async def autocomplete(
             return prefix + UNICODE_FALLBACK_UPPER  # Fallback for maximum codepoint
 
         # Use UNION of two indexed range queries instead of OR (which causes full scan)
+        # Adaptive limit based on query characteristics and geo coordinates:
+        # With ORDER BY distance in the SQL query, closest results come first,
+        # so we can use much lower limits when geo-coordinates are provided
+        # - With geo + ORDER BY distance: moderate limit (1000) is sufficient
+        # - No geo: small limit for performance
+        if latitude is not None and longitude is not None:
+            # With distance ordering, 1000 is enough even for common names like Hauptstraße
+            is_multiword = ' ' in query.strip()
+            if is_multiword or len(query) >= 10:
+                stage_a_limit = 1000
+            else:
+                stage_a_limit = limit * 8
+        else:
+            stage_a_limit = limit * 4
+        
         params: Dict[str, Any] = {
             "q1_start": query,
             "q1_end": prefix_end(query),
-            "limit": limit * 4,
+            "limit": stage_a_limit,
         }
 
         # Build the SQL with UNION to use index on both queries
@@ -340,6 +401,12 @@ async def autocomplete(
             # Wrap with city filter - explicitly list columns instead of SELECT *
             params["city"] = f"{city}%"
             sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({sql}) WHERE city LIKE :city"
+
+        # Order by distance when geo-coordinates are provided
+        if latitude is not None and longitude is not None:
+            params["user_lat"] = latitude
+            params["user_lon"] = longitude
+            sql += " ORDER BY ((latitude - :user_lat) * (latitude - :user_lat) + (longitude - :user_lon) * (longitude - :user_lon))"
 
         sql += " LIMIT :limit"
 
@@ -382,7 +449,8 @@ async def autocomplete(
     async def trigram_search() -> list[tuple[StreetAutocompleteResponse, float, int]]:
         if len(qc) < 2:
             return []
-        trigram_limit = max(limit * 25, 400)
+        # Use performance tuning constants
+        trigram_limit = max(limit * TRIGRAM_LIMIT_MULTIPLIER, TRIGRAM_MIN_LIMIT)
         params: Dict[str, Any] = {"pattern": f"{qc}*", "limit": trigram_limit}
         sql = [
             "SELECT s.id AS street_id, s.name, s.city, s.postal_code, s.latitude, s.longitude,",
@@ -486,15 +554,17 @@ async def autocomplete(
 
     # Stage D: Phonetic search using precomputed phonetic codes (SIMPLIFIED for speed)
     async def phonetic_stage() -> list[tuple[StreetAutocompleteResponse, float, int]]:
-        qg, qc_ph = phonetic_forms(query)
-        q_cons = consonant_key(query)
+        # Use cached phonetic forms
+        qg = qg_phonetic
+        qc_ph = qc_phonetic
+        q_cons = q_consonant
 
         if not qg and not qc_ph and not q_cons:
             return []
 
-        # Simpler, faster phonetic query - just use index prefix matching
+        # Use performance tuning constants
         params: Dict[str, Any] = {
-            "prelimit": max(100, min(300, limit * 30)),
+            "prelimit": max(PHONETIC_MIN_LIMIT, min(PHONETIC_MAX_LIMIT, limit * PHONETIC_LIMIT_MULTIPLIER)),
         }
 
         where_clauses = []
@@ -625,7 +695,7 @@ async def autocomplete(
         parts of the string. This allows matching even when some trigrams are
         affected by typos. The Levenshtein distance filter then removes false positives.
         """
-        qc_lower = qc.lower() if qc else ""
+        # Use cached normalized form
         if len(qc_lower) < 3:
             return []
 
@@ -726,6 +796,9 @@ async def autocomplete(
     # Run retrieval stages with early exit optimization
     # Fast stages first, skip slow stages if we have enough results
 
+    # Store the original city filter for potential fallback
+    original_city = city
+
     # Stage A: Exact prefix (fast, uses index)
     stage_a = await exact_prefix()
 
@@ -741,6 +814,23 @@ async def autocomplete(
     stage_b = []
     if len(stage_a) < limit:
         stage_b = await trigram_search()
+
+    # If city filter was applied but we got no results, try again without city filter
+    # This handles cases where city name doesn't match exactly in database
+    if original_city and len(stage_a) == 0 and len(stage_b) == 0:
+        logger.debug(f"No results found with city filter '{original_city}', retrying without city filter")
+        city = None  # Temporarily remove city filter
+        stage_a_fallback = await exact_prefix()
+        stage_b_fallback = await trigram_search()
+        # Restore city filter for subsequent stages
+        city = original_city
+        # Merge fallback results (they will be penalized by distance if geo coords provided)
+        stage_a.extend(stage_a_fallback)
+        stage_b.extend(stage_b_fallback)
+        stage_a_has_matches = len(stage_a) > 0
+        stage_a_has_good_match = any(
+            sc >= HIGH_QUALITY_SCORE_THRESHOLD for _, sc, _ in stage_a
+        )
 
     # Early exit check after fast stages
     fast_results = [*stage_a, *stage_b]
@@ -799,8 +889,9 @@ async def autocomplete(
             by_id[sid] = (resp, sc)
 
     # Optional phonetic + normalized fuzzy reranking on top K candidates
+    # Use performance tuning constants for candidate pool size
     top_candidates = sorted(by_id.values(), key=lambda t: t[1], reverse=True)[
-        : max(limit * 8, 100)
+        : max(limit * RERANK_CANDIDATE_MULTIPLIER, RERANK_MIN_CANDIDATES)
     ]
     reranked: list[tuple[StreetAutocompleteResponse, float]] = []
     qn_norm = normalize_string(query)
