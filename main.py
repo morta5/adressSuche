@@ -19,7 +19,7 @@ from query_processor import QueryProcessor
 from phonetic import phonetic_match_score, phonetic_forms
 from bktree import levenshtein_distance
 
-from database import get_async_db, init_db
+from database import get_async_db, init_db, _current_db_path
 from models import Street, Address
 
 # Configure logging
@@ -132,7 +132,7 @@ _known_cities: set[str] | None = None
 _known_cities_lock = threading.Lock()
 
 
-def _get_known_cities(db_path: str = "./autocomplete_v2.db") -> set[str]:
+def _get_known_cities(db_path: str = None) -> set[str]:
     """Load known city names from the database (cached, case-insensitive)."""
     global _known_cities
 
@@ -144,6 +144,9 @@ def _get_known_cities(db_path: str = "./autocomplete_v2.db") -> set[str]:
             return _known_cities
 
         try:
+            # Use the current database path from database module if not provided
+            if db_path is None:
+                db_path = _current_db_path
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT city FROM streets WHERE city IS NOT NULL")
