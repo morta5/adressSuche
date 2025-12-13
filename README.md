@@ -62,7 +62,7 @@ pip install -r requirements.txt
 
 A pre-populated database with German address data is available for download:
 
-**Download**: https://cloud.farshidhakimy.de/s/4A82YZZzXtMzkxs
+**Download**: https://cloud.farshidhakimy.de/s/cFGAdoaME3mwP5p
 
 Place the downloaded `autocomplete.db` file in your project directory.
 

@@ -23,7 +23,7 @@ from utils import (
 )
 
 # SQLite database file path
-DEFAULT_DB_PATH = "./autocomplete_v2.db"
+DEFAULT_DB_PATH = "./autocomplete_v3.db"
 _current_db_path = DEFAULT_DB_PATH
 
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DEFAULT_DB_PATH}")

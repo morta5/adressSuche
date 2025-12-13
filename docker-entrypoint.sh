@@ -2,7 +2,7 @@
 set -e
 
 DB_URL="${DATABASE_URL:-sqlite:////data/autocomplete.db}"
-DB_DOWNLOAD_URL="${DB_DOWNLOAD_URL:-https://cloud.farshidhakimy.de/s/4A82YZZzXtMzkxs/download}"
+DB_DOWNLOAD_URL="${DB_DOWNLOAD_URL:-https://cloud.farshidhakimy.de/s/cFGAdoaME3mwP5p/download}"
 DEFAULT_DB_PATH="/data/autocomplete.db"
 DB_PATH="$DEFAULT_DB_PATH"
 SHOULD_DOWNLOAD=1
