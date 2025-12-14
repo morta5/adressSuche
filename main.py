@@ -170,9 +170,11 @@ def _extract_city_from_query(
     For query "jungfernstieg hamburg", returns ("jungfernstieg", "Hamburg").
     For query "hauptstraße berlin mitte", returns ("hauptstraße", "Berlin Mitte").
     For query "bahnhofstraße", returns ("bahnhofstraße", None).
+    For query "kampstraße neum", returns ("kampstraße", "neumünster") - partial match returns actual city.
+    For query "kampstraße neumuenster", returns ("kampstraße", "neumünster") - normalized match returns actual city.
 
     Returns:
-        Tuple of (street_query, detected_city)
+        Tuple of (street_query, detected_city_from_database)
     """
     parts = query.strip().split()
     if len(parts) < 2:
@@ -181,13 +183,50 @@ def _extract_city_from_query(
     # Try to match last N words as a city (N from 1 to min(3, len(parts)-1))
     for n in range(min(3, len(parts) - 1), 0, -1):
         potential_city = " ".join(parts[-n:]).lower()
+        potential_city_normalized = normalize_compact(potential_city)
 
-        # Check if this is a known city
+        # Strategy 1: Exact match (fastest)
         if potential_city in known_cities:
             street_query = " ".join(parts[:-n])
-            # Return city with original casing from query
+            # Return the actual city from database (with proper casing)
+            # Find the exact match in known_cities to preserve casing
+            for known_city in known_cities:
+                if known_city == potential_city:
+                    detected_city = known_city
+                    return street_query, detected_city
+            # Fallback (should not reach here)
             detected_city = " ".join(parts[-n:])
             return street_query, detected_city
+        
+        # Strategy 2: Normalized match (handles "neumuenster" vs "neumünster")
+        # Check if normalized form matches any known city's normalized form
+        for known_city in known_cities:
+            known_city_normalized = normalize_compact(known_city)
+            if potential_city_normalized == known_city_normalized:
+                street_query = " ".join(parts[:-n])
+                # Return the actual city from database (with ü, not ue)
+                detected_city = known_city
+                return street_query, detected_city
+        
+        # Strategy 3: Partial prefix match (handles "neumu" for "neumünster")
+        # Only for single-word cities and if at least 5 characters (to avoid ambiguity)
+        if n == 1 and len(potential_city) >= 5:
+            # Collect all matching cities and prefer shorter ones
+            matching_cities = []
+            for known_city in known_cities:
+                known_city_normalized = normalize_compact(known_city)
+                # Check if the normalized potential city is a prefix of a known city
+                if known_city_normalized.startswith(potential_city_normalized):
+                    matching_cities.append(known_city)
+            
+            if matching_cities:
+                # Prefer shorter city names (more specific matches)
+                # Sort by length, then alphabetically
+                matching_cities.sort(key=lambda c: (len(c), c))
+                street_query = " ".join(parts[:-n])
+                # Return the shortest matching city (most likely to be the intended one)
+                detected_city = matching_cities[0]
+                return street_query, detected_city
 
     return query, None
 
@@ -405,8 +444,9 @@ async def autocomplete(
 
         if city:
             # Wrap with city filter - explicitly list columns instead of SELECT *
-            params["city"] = f"{city}%"
-            sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({sql}) WHERE city LIKE :city"
+            # Use LOWER for case-insensitive matching (handles "neum" matching "Neumünster")
+            params["city"] = f"{city.lower()}%"
+            sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({sql}) WHERE LOWER(city) LIKE :city"
 
         # Order by distance when geo-coordinates are provided
         if latitude is not None and longitude is not None:
@@ -465,8 +505,8 @@ async def autocomplete(
             "WHERE street_trigram MATCH :pattern",
         ]
         if city:
-            sql.append("AND s.city LIKE :city")
-            params["city"] = f"{city}%"
+            sql.append("AND LOWER(s.city) LIKE :city")
+            params["city"] = f"{city.lower()}%"
         sql.append("ORDER BY rnk ASC, s.name ASC LIMIT :limit")
         try:
             rows = (await db.execute(text("\n".join(sql)), params)).fetchall()
@@ -525,8 +565,8 @@ async def autocomplete(
             WHERE ({or_clauses})
         """
         if city:
-            sql += " AND city LIKE :city"
-            params["city"] = f"{city}%"
+            sql += " AND LOWER(city) LIKE :city"
+            params["city"] = f"{city.lower()}%"
         sql += " LIMIT :limit"
 
         try:
@@ -594,8 +634,8 @@ async def autocomplete(
             WHERE ({where_str})
         """
         if city:
-            sql += " AND city LIKE :city"
-            params["city"] = f"{city}%"
+            sql += " AND LOWER(city) LIKE :city"
+            params["city"] = f"{city.lower()}%"
         sql += " LIMIT :prelimit"
 
         try:
@@ -738,8 +778,8 @@ async def autocomplete(
             "WHERE street_trigram MATCH :pattern",
         ]
         if city:
-            sql.append("AND s.city LIKE :city")
-            params["city"] = f"{city}%"
+            sql.append("AND LOWER(s.city) LIKE :city")
+            params["city"] = f"{city.lower()}%"
         # ORDER BY bm25 to get best matches first (not rowid order)
         sql.append("ORDER BY bm25(street_trigram) ASC LIMIT :limit")
 
