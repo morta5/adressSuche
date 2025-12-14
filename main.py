@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select, text, or_
+from sqlalchemy import select, text, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from query_processor import QueryProcessor
@@ -129,12 +129,16 @@ def _collect_phonetic_codes(candidates: List[str]) -> Tuple[List[str], List[str]
 
 # Cache for known city names (lazy loaded)
 _known_cities: set[str] | None = None
-_known_cities_lock = asyncio.Lock()
+_known_cities_lock: asyncio.Lock | None = None
 
 
 async def _get_known_cities(db: AsyncSession) -> set[str]:
     """Load known city names from the database (cached, case-insensitive)."""
-    global _known_cities
+    global _known_cities, _known_cities_lock
+
+    # Initialize lock lazily to ensure it's created in the event loop
+    if _known_cities_lock is None:
+        _known_cities_lock = asyncio.Lock()
 
     if _known_cities is not None:
         return _known_cities
@@ -225,13 +229,17 @@ async def _extract_city_from_query(
                 if latitude is not None and longitude is not None and db is not None:
                     try:
                         # Get coordinates for each matching city using async SQLAlchemy
-                        # Build WHERE clause for case-insensitive matching
-                        city_conditions = [Street.city.ilike(city) for city in matching_cities]
+                        # Use func.lower() with IN for better performance
+                        from sqlalchemy import func
+                        
+                        # Create lowercase versions of matching cities for case-insensitive comparison
+                        lowercase_cities = [city.lower() for city in matching_cities]
+                        
                         stmt = (
                             select(Street.city, 
-                                   text("AVG(latitude) as avg_lat"), 
-                                   text("AVG(longitude) as avg_lon"))
-                            .where(or_(*city_conditions))
+                                   func.avg(Street.latitude).label("avg_lat"), 
+                                   func.avg(Street.longitude).label("avg_lon"))
+                            .where(func.lower(Street.city).in_(lowercase_cities))
                             .group_by(Street.city)
                         )
                         

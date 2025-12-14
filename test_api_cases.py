@@ -377,14 +377,14 @@ class TestCityExtraction:
                 try:
                     known_cities = await _get_known_cities(db)
 
-                    # Test extraction
-                    query, city = await _extract_city_from_query("jungfernstieg hamburg", known_cities)
+                    # Test extraction (pass db for potential geographic disambiguation)
+                    query, city = await _extract_city_from_query("jungfernstieg hamburg", known_cities, db=db)
                     assert query == "jungfernstieg"
                     assert city is not None
                     assert city.lower() == "hamburg"
 
                     # Test no extraction for query without city
-                    query, city = await _extract_city_from_query("bahnhofstraße", known_cities)
+                    query, city = await _extract_city_from_query("bahnhofstraße", known_cities, db=db)
                     assert query == "bahnhofstraße"
                     assert city is None
                 finally:
