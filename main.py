@@ -230,7 +230,6 @@ async def _extract_city_from_query(
                     try:
                         # Get coordinates for each matching city using async SQLAlchemy
                         # Use func.lower() with IN for better performance
-                        from sqlalchemy import func
                         
                         # Create lowercase versions of matching cities for case-insensitive comparison
                         lowercase_cities = [city.lower() for city in matching_cities]
