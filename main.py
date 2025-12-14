@@ -174,8 +174,8 @@ def _extract_city_from_query(
     For query "jungfernstieg hamburg", returns ("jungfernstieg", "Hamburg").
     For query "hauptstraße berlin mitte", returns ("hauptstraße", "Berlin Mitte").
     For query "bahnhofstraße", returns ("bahnhofstraße", None).
-    For query "kampstraße neum" with coordinates near Neumünster, returns ("kampstraße", "neumünster") - uses geo distance.
-    For query "kampstraße neumuenster", returns ("kampstraße", "neumünster") - normalized match returns actual city.
+    For query "kampstraße neum" with coordinates near Neumünster, returns ("kampstraße", "Neumünster") - uses geo distance.
+    For query "kampstraße neumuenster", returns ("kampstraße", "Neumünster") - normalized match returns actual city.
 
     Args:
         query: Search query
@@ -199,14 +199,8 @@ def _extract_city_from_query(
         # Strategy 1: Exact match (fastest)
         if potential_city in known_cities:
             street_query = " ".join(parts[:-n])
-            # Return the actual city from database (with proper casing)
-            # Find the exact match in known_cities to preserve casing
-            for known_city in known_cities:
-                if known_city == potential_city:
-                    detected_city = known_city
-                    return street_query, detected_city
-            # Fallback (should not reach here)
-            detected_city = " ".join(parts[-n:])
+            # Return the potential_city directly (already lowercase from known_cities set)
+            detected_city = potential_city
             return street_query, detected_city
         
         # Strategy 2: Normalized match (handles "neumuenster" vs "neumünster")
@@ -236,43 +230,41 @@ def _extract_city_from_query(
                 # If we have geographic coordinates, use them to disambiguate
                 if latitude is not None and longitude is not None and db_path:
                     try:
-                        import sqlite3
-                        conn = sqlite3.connect(db_path)
-                        cursor = conn.cursor()
-                        
-                        # Get coordinates for each matching city (case-insensitive)
-                        city_coords = {}
-                        # Build WHERE clause with LOWER() for case-insensitive matching
-                        where_clauses = ' OR '.join(['LOWER(city) = ?' for _ in matching_cities])
-                        query_sql = f"""
-                            SELECT city, AVG(latitude) as avg_lat, AVG(longitude) as avg_lon
-                            FROM streets
-                            WHERE {where_clauses}
-                            GROUP BY city
-                        """
-                        # Pass lowercase city names as parameters
-                        cursor.execute(query_sql, [c.lower() for c in matching_cities])
-                        for row in cursor.fetchall():
-                            city_name, avg_lat, avg_lon = row
-                            city_coords[city_name] = (avg_lat, avg_lon)
-                        
-                        conn.close()
-                        
-                        # Find the closest city by geographic distance
-                        if city_coords:
-                            best_city = None
-                            best_distance = float('inf')
+                        # Use context manager for proper connection handling
+                        with sqlite3.connect(db_path) as conn:
+                            cursor = conn.cursor()
                             
-                            for city_name, (city_lat, city_lon) in city_coords.items():
-                                distance = haversine_distance(latitude, longitude, city_lat, city_lon)
-                                if distance < best_distance:
-                                    best_distance = distance
-                                    best_city = city_name
+                            # Get coordinates for each matching city (case-insensitive)
+                            city_coords = {}
+                            # Build WHERE clause with LOWER() for case-insensitive matching
+                            where_clauses = ' OR '.join(['LOWER(city) = ?' for _ in matching_cities])
+                            query_sql = f"""
+                                SELECT city, AVG(latitude) as avg_lat, AVG(longitude) as avg_lon
+                                FROM streets
+                                WHERE {where_clauses}
+                                GROUP BY city
+                            """
+                            # Pass lowercase city names as parameters
+                            cursor.execute(query_sql, [c.lower() for c in matching_cities])
+                            for row in cursor.fetchall():
+                                city_name, avg_lat, avg_lon = row
+                                city_coords[city_name] = (avg_lat, avg_lon)
                             
-                            if best_city:
-                                detected_city = best_city
-                                return street_query, detected_city
-                    except Exception as e:
+                            # Find the closest city by geographic distance
+                            if city_coords:
+                                best_city = None
+                                best_distance = float('inf')
+                                
+                                for city_name, (city_lat, city_lon) in city_coords.items():
+                                    distance = haversine_distance(latitude, longitude, city_lat, city_lon)
+                                    if distance < best_distance:
+                                        best_distance = distance
+                                        best_city = city_name
+                                
+                                if best_city:
+                                    detected_city = best_city
+                                    return street_query, detected_city
+                    except (sqlite3.Error, sqlite3.DatabaseError) as e:
                         # If geo disambiguation fails, fall back to shortest match
                         logger.debug(f"Geographic disambiguation failed: {e}")
                         pass
