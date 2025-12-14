@@ -276,6 +276,7 @@ def init_db():
     _ensure_trigram_index()
     _ensure_spellfix_index()
     _ensure_street_segments_indexes()
+    _ensure_city_lower_index()
 
 
 def get_db():
@@ -784,6 +785,18 @@ def _ensure_street_segments_indexes() -> None:
             text(
                 "CREATE INDEX IF NOT EXISTS idx_segment_street_id "
                 "ON street_segments (street_id)"
+            )
+        )
+
+
+def _ensure_city_lower_index() -> None:
+    """Ensure index on LOWER(city) exists for case-insensitive city searches."""
+    with engine.begin() as conn:
+        # Create index on LOWER(city) if it doesn't exist
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_street_city_lower "
+                "ON streets (LOWER(city))"
             )
         )
 
