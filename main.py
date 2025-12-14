@@ -162,7 +162,11 @@ def _get_known_cities(db_path: str = None) -> set[str]:
 
 
 def _extract_city_from_query(
-    query: str, known_cities: set[str]
+    query: str, 
+    known_cities: set[str],
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    db_path: Optional[str] = None
 ) -> Tuple[str, Optional[str]]:
     """
     Extract city name from the end of query if present.
@@ -170,8 +174,15 @@ def _extract_city_from_query(
     For query "jungfernstieg hamburg", returns ("jungfernstieg", "Hamburg").
     For query "hauptstraße berlin mitte", returns ("hauptstraße", "Berlin Mitte").
     For query "bahnhofstraße", returns ("bahnhofstraße", None).
-    For query "kampstraße neum", returns ("kampstraße", "neumünster") - partial match returns actual city.
+    For query "kampstraße neum" with coordinates near Neumünster, returns ("kampstraße", "neumünster") - uses geo distance.
     For query "kampstraße neumuenster", returns ("kampstraße", "neumünster") - normalized match returns actual city.
+
+    Args:
+        query: Search query
+        known_cities: Set of known city names (lowercase)
+        latitude: Optional latitude for geographic disambiguation
+        longitude: Optional longitude for geographic disambiguation
+        db_path: Optional database path to query city coordinates
 
     Returns:
         Tuple of (street_query, detected_city_from_database)
@@ -208,10 +219,10 @@ def _extract_city_from_query(
                 detected_city = known_city
                 return street_query, detected_city
         
-        # Strategy 3: Partial prefix match (handles "neumu" for "neumünster")
-        # Only for single-word cities and if at least 5 characters (to avoid ambiguity)
-        if n == 1 and len(potential_city) >= 5:
-            # Collect all matching cities and prefer shorter ones
+        # Strategy 3: Partial prefix match (handles "neum" for "neumünster")
+        # Only for single-word cities and if at least 4 characters
+        if n == 1 and len(potential_city) >= 4:
+            # Collect all matching cities
             matching_cities = []
             for known_city in known_cities:
                 known_city_normalized = normalize_compact(known_city)
@@ -220,11 +231,55 @@ def _extract_city_from_query(
                     matching_cities.append(known_city)
             
             if matching_cities:
-                # Prefer shorter city names (more specific matches)
+                street_query = " ".join(parts[:-n])
+                
+                # If we have geographic coordinates, use them to disambiguate
+                if latitude is not None and longitude is not None and db_path:
+                    try:
+                        import sqlite3
+                        conn = sqlite3.connect(db_path)
+                        cursor = conn.cursor()
+                        
+                        # Get coordinates for each matching city (case-insensitive)
+                        city_coords = {}
+                        # Build WHERE clause with LOWER() for case-insensitive matching
+                        where_clauses = ' OR '.join(['LOWER(city) = ?' for _ in matching_cities])
+                        query_sql = f"""
+                            SELECT city, AVG(latitude) as avg_lat, AVG(longitude) as avg_lon
+                            FROM streets
+                            WHERE {where_clauses}
+                            GROUP BY city
+                        """
+                        # Pass lowercase city names as parameters
+                        cursor.execute(query_sql, [c.lower() for c in matching_cities])
+                        for row in cursor.fetchall():
+                            city_name, avg_lat, avg_lon = row
+                            city_coords[city_name] = (avg_lat, avg_lon)
+                        
+                        conn.close()
+                        
+                        # Find the closest city by geographic distance
+                        if city_coords:
+                            best_city = None
+                            best_distance = float('inf')
+                            
+                            for city_name, (city_lat, city_lon) in city_coords.items():
+                                distance = haversine_distance(latitude, longitude, city_lat, city_lon)
+                                if distance < best_distance:
+                                    best_distance = distance
+                                    best_city = city_name
+                            
+                            if best_city:
+                                detected_city = best_city
+                                return street_query, detected_city
+                    except Exception as e:
+                        # If geo disambiguation fails, fall back to shortest match
+                        logger.debug(f"Geographic disambiguation failed: {e}")
+                        pass
+                
+                # Fallback: prefer shorter city names (more specific matches)
                 # Sort by length, then alphabetically
                 matching_cities.sort(key=lambda c: (len(c), c))
-                street_query = " ".join(parts[:-n])
-                # Return the shortest matching city (most likely to be the intended one)
                 detected_city = matching_cities[0]
                 return street_query, detected_city
 
@@ -358,7 +413,9 @@ async def autocomplete(
     # E.g., "jungfernstieg hamburg" -> query="jungfernstieg", city="hamburg"
     if city is None:
         known_cities = _get_known_cities()
-        query, detected_city = _extract_city_from_query(query, known_cities)
+        query, detected_city = _extract_city_from_query(
+            query, known_cities, latitude, longitude, _current_db_path
+        )
         if detected_city:
             city = detected_city
             logger.debug(f"Extracted city '{city}' from query, street query: '{query}'")
