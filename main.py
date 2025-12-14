@@ -4,7 +4,6 @@ import asyncio
 import logging
 import math
 import os
-import sqlite3
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
@@ -12,14 +11,14 @@ from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select, text, or_
+from sqlalchemy import select, text, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from query_processor import QueryProcessor
 from phonetic import phonetic_match_score, phonetic_forms
 from bktree import levenshtein_distance
 
-from database import get_async_db, init_db, _current_db_path
+from database import get_async_db, init_db
 from models import Street, Address
 
 # Configure logging
@@ -60,8 +59,7 @@ TRIGRAM_LONG_THRESHOLD = 9  # Queries with >= 9 trigrams use full selection
 TRIGRAM_MEDIUM_THRESHOLD = 6  # Queries with >= 6 trigrams use medium selection
 TRIGRAM_SHORT_THRESHOLD = 4  # Queries with >= 4 trigrams use short selection
 
-# Thread-safe lazy loading using threading.Lock
-import threading
+# Async-safe lazy loading using asyncio.Lock
 
 
 async def _geo_bounds(
@@ -131,29 +129,29 @@ def _collect_phonetic_codes(candidates: List[str]) -> Tuple[List[str], List[str]
 
 # Cache for known city names (lazy loaded)
 _known_cities: set[str] | None = None
-_known_cities_lock = threading.Lock()
+_known_cities_lock: asyncio.Lock | None = None
 
 
-def _get_known_cities(db_path: str = None) -> set[str]:
+async def _get_known_cities(db: AsyncSession) -> set[str]:
     """Load known city names from the database (cached, case-insensitive)."""
-    global _known_cities
+    global _known_cities, _known_cities_lock
+
+    # Initialize lock lazily to ensure it's created in the event loop
+    if _known_cities_lock is None:
+        _known_cities_lock = asyncio.Lock()
 
     if _known_cities is not None:
         return _known_cities
 
-    with _known_cities_lock:
+    async with _known_cities_lock:
         if _known_cities is not None:
             return _known_cities
 
         try:
-            # Use the current database path from database module if not provided
-            if db_path is None:
-                db_path = _current_db_path
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT city FROM streets WHERE city IS NOT NULL")
-            cities = {row[0].lower() for row in cursor.fetchall() if row[0]}
-            conn.close()
+            # Query distinct cities using SQLAlchemy async session
+            stmt = select(Street.city).distinct().where(Street.city.isnot(None))
+            result = await db.execute(stmt)
+            cities = {row[0].lower() for row in result.fetchall() if row[0]}
             _known_cities = cities
             return _known_cities
         except Exception as e:
@@ -161,12 +159,12 @@ def _get_known_cities(db_path: str = None) -> set[str]:
             return set()
 
 
-def _extract_city_from_query(
+async def _extract_city_from_query(
     query: str, 
     known_cities: set[str],
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
-    db_path: Optional[str] = None
+    db: Optional[AsyncSession] = None
 ) -> Tuple[str, Optional[str]]:
     """
     Extract city name from the end of query if present.
@@ -182,7 +180,7 @@ def _extract_city_from_query(
         known_cities: Set of known city names (lowercase)
         latitude: Optional latitude for geographic disambiguation
         longitude: Optional longitude for geographic disambiguation
-        db_path: Optional database path to query city coordinates
+        db: Optional database session to query city coordinates
 
     Returns:
         Tuple of (street_query, detected_city_from_database)
@@ -227,44 +225,46 @@ def _extract_city_from_query(
             if matching_cities:
                 street_query = " ".join(parts[:-n])
                 
-                # If we have geographic coordinates, use them to disambiguate
-                if latitude is not None and longitude is not None and db_path:
+                # If we have geographic coordinates and a database session, use them to disambiguate
+                if latitude is not None and longitude is not None and db is not None:
                     try:
-                        # Use context manager for proper connection handling
-                        with sqlite3.connect(db_path) as conn:
-                            cursor = conn.cursor()
+                        # Get coordinates for each matching city using async SQLAlchemy
+                        # Use func.lower() with IN for better performance
+                        
+                        # Create lowercase versions of matching cities for case-insensitive comparison
+                        lowercase_cities = [city.lower() for city in matching_cities]
+                        
+                        stmt = (
+                            select(Street.city, 
+                                   func.avg(Street.latitude).label("avg_lat"), 
+                                   func.avg(Street.longitude).label("avg_lon"))
+                            .where(func.lower(Street.city).in_(lowercase_cities))
+                            .group_by(Street.city)
+                        )
+                        
+                        result = await db.execute(stmt)
+                        city_coords = {}
+                        for row in result.fetchall():
+                            city_name = row[0]
+                            avg_lat = row[1]
+                            avg_lon = row[2]
+                            city_coords[city_name] = (avg_lat, avg_lon)
+                        
+                        # Find the closest city by geographic distance
+                        if city_coords:
+                            best_city = None
+                            best_distance = float('inf')
                             
-                            # Get coordinates for each matching city (case-insensitive)
-                            city_coords = {}
-                            # Build WHERE clause with LOWER() for case-insensitive matching
-                            where_clauses = ' OR '.join(['LOWER(city) = ?' for _ in matching_cities])
-                            query_sql = f"""
-                                SELECT city, AVG(latitude) as avg_lat, AVG(longitude) as avg_lon
-                                FROM streets
-                                WHERE {where_clauses}
-                                GROUP BY city
-                            """
-                            # Pass lowercase city names as parameters
-                            cursor.execute(query_sql, [c.lower() for c in matching_cities])
-                            for row in cursor.fetchall():
-                                city_name, avg_lat, avg_lon = row
-                                city_coords[city_name] = (avg_lat, avg_lon)
+                            for city_name, (city_lat, city_lon) in city_coords.items():
+                                distance = haversine_distance(latitude, longitude, city_lat, city_lon)
+                                if distance < best_distance:
+                                    best_distance = distance
+                                    best_city = city_name
                             
-                            # Find the closest city by geographic distance
-                            if city_coords:
-                                best_city = None
-                                best_distance = float('inf')
-                                
-                                for city_name, (city_lat, city_lon) in city_coords.items():
-                                    distance = haversine_distance(latitude, longitude, city_lat, city_lon)
-                                    if distance < best_distance:
-                                        best_distance = distance
-                                        best_city = city_name
-                                
-                                if best_city:
-                                    detected_city = best_city
-                                    return street_query, detected_city
-                    except (sqlite3.Error, sqlite3.DatabaseError) as e:
+                            if best_city:
+                                detected_city = best_city
+                                return street_query, detected_city
+                    except Exception as e:
                         # If geo disambiguation fails, fall back to shortest match
                         logger.debug(f"Geographic disambiguation failed: {e}")
                         pass
@@ -404,9 +404,9 @@ async def autocomplete(
     # Extract city from query if not provided explicitly
     # E.g., "jungfernstieg hamburg" -> query="jungfernstieg", city="hamburg"
     if city is None:
-        known_cities = _get_known_cities()
-        query, detected_city = _extract_city_from_query(
-            query, known_cities, latitude, longitude, _current_db_path
+        known_cities = await _get_known_cities(db)
+        query, detected_city = await _extract_city_from_query(
+            query, known_cities, latitude, longitude, db
         )
         if detected_city:
             city = detected_city

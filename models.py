@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     UniqueConstraint,
     event,
+    text,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -50,6 +51,7 @@ class Street(Base):
         Index('idx_street_name_city', 'name', 'city'),
         Index('idx_street_location', 'latitude', 'longitude'),
         Index('idx_street_normalized_name', 'normalized_name'),
+        Index('idx_street_city_lower', text('LOWER(city)')),
         UniqueConstraint('name', 'postal_code', 'city', name='uq_street_name_city'),
     )
 

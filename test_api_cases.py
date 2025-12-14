@@ -365,23 +365,29 @@ class TestCityExtraction:
     def test_extract_city_from_query(self):
         """Test city extraction function."""
         from main import _extract_city_from_query, _get_known_cities
+        from database import AsyncSessionLocal
 
         # Skip if database not available
         if not _real_db_available():
             pytest.skip("Real database not available")
 
-        known_cities = _get_known_cities()
+        async def run_test():
+            # Get async database session using proper context manager
+            async with AsyncSessionLocal() as db:
+                known_cities = await _get_known_cities(db)
 
-        # Test extraction
-        query, city = _extract_city_from_query("jungfernstieg hamburg", known_cities)
-        assert query == "jungfernstieg"
-        assert city is not None
-        assert city.lower() == "hamburg"
+                # Test extraction (pass db for potential geographic disambiguation)
+                query, city = await _extract_city_from_query("jungfernstieg hamburg", known_cities, db=db)
+                assert query == "jungfernstieg"
+                assert city is not None
+                assert city.lower() == "hamburg"
 
-        # Test no extraction for query without city
-        query, city = _extract_city_from_query("bahnhofstraße", known_cities)
-        assert query == "bahnhofstraße"
-        assert city is None
+                # Test no extraction for query without city
+                query, city = await _extract_city_from_query("bahnhofstraße", known_cities, db=db)
+                assert query == "bahnhofstraße"
+                assert city is None
+
+        asyncio.run(run_test())
 
     def test_city_extraction_with_api(self):
         """Test that city extraction works in API."""
