@@ -171,6 +171,38 @@ TEST_CASES: List[APITestCase] = [
         max_time_ms=200,
         description="High rowid stress test: Hauptstraße with ID 1219975 in Neuenkirchen (0.64km away) should be found",
     ),
+    # Issue: Kampstraße with partial/normalized city names
+    # See: https://github.com/morta5/adressSuche/issues/X
+    APITestCase(
+        name="kampstrasse_neum_partial",
+        query="kampstraße neum",
+        latitude=54.0724,  # Neumünster coordinates - used for geographic disambiguation
+        longitude=9.9858,
+        expected_result="Kampstraße",
+        expected_city="Neumünster",
+        max_time_ms=200,
+        description="Issue: 'kampstraße neum' (partial city) should find 'Kampstraße' in Neumünster using geographic disambiguation",
+    ),
+    APITestCase(
+        name="kampstrasse_neumuenster_normalized",
+        query="kampstraße neumuenster",
+        latitude=54.0724,  # Neumünster coordinates
+        longitude=9.9858,
+        expected_result="Kampstraße",
+        expected_city="Neumünster",
+        max_time_ms=200,
+        description="Issue: 'kampstraße neumuenster' (with 'ue') should find 'Kampstraße' in Neumünster (with 'ü')",
+    ),
+    APITestCase(
+        name="kampstrasse_neumuenster_proper",
+        query="kampstraße neumünster",
+        latitude=54.0724,
+        longitude=9.9858,
+        expected_result="Kampstraße",
+        expected_city="Neumünster",
+        max_time_ms=200,
+        description="Issue: 'kampstraße neumünster' should find 'Kampstraße' in Neumünster",
+    ),
 ]
 
 # Minimum size for real database in bytes (1MB)
