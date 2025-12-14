@@ -174,6 +174,16 @@ TEST_CASES: List[APITestCase] = [
     # Issue: Kampstraße with partial/normalized city names
     # See: https://github.com/morta5/adressSuche/issues/X
     APITestCase(
+        name="kampstrasse_neum_partial",
+        query="kampstraße neum",
+        latitude=54.0724,  # Neumünster coordinates - used for geographic disambiguation
+        longitude=9.9858,
+        expected_result="Kampstraße",
+        expected_city="Neumünster",
+        max_time_ms=200,
+        description="Issue: 'kampstraße neum' (partial city) should find 'Kampstraße' in Neumünster using geographic disambiguation",
+    ),
+    APITestCase(
         name="kampstrasse_neumuenster_normalized",
         query="kampstraße neumuenster",
         latitude=54.0724,  # Neumünster coordinates
