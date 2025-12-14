@@ -943,8 +943,27 @@ async def validate_address(
         # Use flexible city matching with all variations
         city_conditions = [Street.city.ilike(f"{var}%") for var in city_variations]
         stmt = stmt.where(or_(*city_conditions))
-    res = await db.execute(stmt.limit(30))
-    streets = res.scalars().all()
+    
+    # If lat/lng provided, try nearby streets first (50km radius), then fallback to all
+    streets = []
+    if latitude is not None and longitude is not None:
+        # First try: search within 50km radius
+        min_lat, max_lat, min_lon, max_lon = await _geo_bounds(latitude, longitude, 50.0)
+        stmt_nearby = stmt.where(
+            Street.latitude.between(min_lat, max_lat),
+            Street.longitude.between(min_lon, max_lon)
+        )
+        res = await db.execute(stmt_nearby.limit(100))
+        streets = res.scalars().all()
+        
+        # If no nearby results, search without geo-bounds (for far away addresses)
+        if not streets:
+            res = await db.execute(stmt.limit(100))
+            streets = res.scalars().all()
+    else:
+        # Without lat/lng, limit to first 30 results
+        res = await db.execute(stmt.limit(30))
+        streets = res.scalars().all()
 
     # If no strict match, try name ilike and phonetic code match as fallback
     if not streets:
@@ -961,13 +980,30 @@ async def validate_address(
             conditions.append(
                 Street.phonetic_cologne.like(f"{qc_ph[: max(1, len(qc_ph) - 1)]}%")
             )
-        stmt2 = select(Street).where(or_(*conditions)).limit(60)
+        stmt2 = select(Street).where(or_(*conditions))
         if city_norm and city_variations:
             # Use flexible city matching here too
             city_conditions = [Street.city.ilike(f"{var}%") for var in city_variations]
             stmt2 = stmt2.where(or_(*city_conditions))
-        res2 = await db.execute(stmt2)
-        streets = res2.scalars().all()
+        
+        # Apply same geo-filtering strategy: nearby first, then fallback
+        if latitude is not None and longitude is not None:
+            # First try: search within 50km radius
+            min_lat, max_lat, min_lon, max_lon = await _geo_bounds(latitude, longitude, 50.0)
+            stmt2_nearby = stmt2.where(
+                Street.latitude.between(min_lat, max_lat),
+                Street.longitude.between(min_lon, max_lon)
+            )
+            res2 = await db.execute(stmt2_nearby.limit(100))
+            streets = res2.scalars().all()
+            
+            # If no nearby results, search without geo-bounds
+            if not streets:
+                res2 = await db.execute(stmt2.limit(100))
+                streets = res2.scalars().all()
+        else:
+            res2 = await db.execute(stmt2.limit(60))
+            streets = res2.scalars().all()
     
     # If city filter was provided, filter streets by normalized city name for better matching
     if city_norm and streets:
@@ -992,44 +1028,58 @@ async def validate_address(
             )
         )
 
-    # Check addresses on found streets
+    # First, collect all exact matches across all candidate streets
+    exact_matches = []
     for st in streets:
-        # First try exact match
         a_stmt = (
             select(Address)
             .where(Address.street_id == st.id, Address.house_number == house_number)
-            .limit(1)
         )
         ares = await db.execute(a_stmt)
-        addr = ares.scalars().first()
-        
-        # If exact match found, return it
-        if addr:
-            resp = AddressValidationResponse(
-                exists=True,
-                address_id=int(getattr(addr, "id")),
-                street_name=str(getattr(st, "name")),
-                city=str(getattr(st, "city")),
-                postal_code=str(getattr(st, "postal_code"))
-                if getattr(st, "postal_code") is not None
-                else None,
-                house_number=str(getattr(addr, "house_number")),
-                latitude=float(getattr(addr, "latitude")),
-                longitude=float(getattr(addr, "longitude")),
-            )
-            if latitude is not None and longitude is not None:
-                resp.distance_km = round(
-                    haversine_distance(
-                        float(latitude),
-                        float(longitude),
-                        float(getattr(addr, "latitude")),
-                        float(getattr(addr, "longitude")),
-                    ),
-                    2,
+        addrs = ares.scalars().all()
+        for addr in addrs:
+            exact_matches.append((st, addr))
+    
+    # If we have exact matches and lat/lng, pick the closest one
+    if exact_matches:
+        if latitude is not None and longitude is not None:
+            exact_matches = sorted(
+                exact_matches,
+                key=lambda x: haversine_distance(
+                    latitude, longitude,
+                    float(getattr(x[1], "latitude")),
+                    float(getattr(x[1], "longitude"))
                 )
-            return resp
-        
-        # If no exact match, try soft validation - find nearest house number
+            )
+        st, addr = exact_matches[0]
+        resp = AddressValidationResponse(
+            exists=True,
+            address_id=int(getattr(addr, "id")),
+            street_name=str(getattr(st, "name")),
+            city=str(getattr(st, "city")),
+            postal_code=str(getattr(st, "postal_code"))
+            if getattr(st, "postal_code") is not None
+            else None,
+            house_number=str(getattr(addr, "house_number")),
+            latitude=float(getattr(addr, "latitude")),
+            longitude=float(getattr(addr, "longitude")),
+        )
+        if latitude is not None and longitude is not None:
+            resp.distance_km = round(
+                haversine_distance(
+                    float(latitude),
+                    float(longitude),
+                    float(getattr(addr, "latitude")),
+                    float(getattr(addr, "longitude")),
+                ),
+                2,
+            )
+        return resp
+    
+    # No exact match found - try soft validation with nearest house number
+    # Collect all possible soft matches from all candidate streets
+    soft_matches = []
+    for st in streets:
         # Get all house numbers for this street
         all_hn_stmt = select(Address).where(Address.street_id == st.id)
         all_hn_res = await db.execute(all_hn_stmt)
@@ -1045,43 +1095,44 @@ async def validate_address(
             if nearest_hn:
                 # Find all addresses with this house number (could be multiple on same street)
                 matching_addresses = [addr for addr in all_addresses if str(getattr(addr, "house_number")) == nearest_hn]
-                
-                # If lat/lng provided, pick the closest address
-                if latitude is not None and longitude is not None and matching_addresses:
-                    matching_addresses = sorted(
-                        matching_addresses,
-                        key=lambda a: haversine_distance(
-                            latitude, longitude,
-                            float(getattr(a, "latitude")),
-                            float(getattr(a, "longitude"))
-                        )
-                    )
-                
-                if matching_addresses:
-                    addr = matching_addresses[0]
-                    resp = AddressValidationResponse(
-                        exists=True,
-                        address_id=int(getattr(addr, "id")),
-                        street_name=str(getattr(st, "name")),
-                        city=str(getattr(st, "city")),
-                        postal_code=str(getattr(st, "postal_code"))
-                        if getattr(st, "postal_code") is not None
-                        else None,
-                        house_number=str(getattr(addr, "house_number")),
-                        latitude=float(getattr(addr, "latitude")),
-                        longitude=float(getattr(addr, "longitude")),
-                    )
-                    if latitude is not None and longitude is not None:
-                        resp.distance_km = round(
-                            haversine_distance(
-                                float(latitude),
-                                float(longitude),
-                                float(getattr(addr, "latitude")),
-                                float(getattr(addr, "longitude")),
-                            ),
-                            2,
-                        )
-                    return resp
+                for addr in matching_addresses:
+                    soft_matches.append((st, addr))
+    
+    # If we have soft matches, pick the closest one if lat/lng provided
+    if soft_matches:
+        if latitude is not None and longitude is not None:
+            soft_matches = sorted(
+                soft_matches,
+                key=lambda x: haversine_distance(
+                    latitude, longitude,
+                    float(getattr(x[1], "latitude")),
+                    float(getattr(x[1], "longitude"))
+                )
+            )
+        st, addr = soft_matches[0]
+        resp = AddressValidationResponse(
+            exists=True,
+            address_id=int(getattr(addr, "id")),
+            street_name=str(getattr(st, "name")),
+            city=str(getattr(st, "city")),
+            postal_code=str(getattr(st, "postal_code"))
+            if getattr(st, "postal_code") is not None
+            else None,
+            house_number=str(getattr(addr, "house_number")),
+            latitude=float(getattr(addr, "latitude")),
+            longitude=float(getattr(addr, "longitude")),
+        )
+        if latitude is not None and longitude is not None:
+            resp.distance_km = round(
+                haversine_distance(
+                    float(latitude),
+                    float(longitude),
+                    float(getattr(addr, "latitude")),
+                    float(getattr(addr, "longitude")),
+                ),
+                2,
+            )
+        return resp
 
     return AddressValidationResponse(exists=False)
 
