@@ -50,6 +50,7 @@ class QueryProcessor:
         's': ['straße', 'strasse'],
         'str': ['straße', 'strasse'],
         'str.': ['straße', 'strasse'],
+        'st': ['straße', 'strasse'],  # Added for partial typing like "kampst"
         'w': ['weg'],
         'we': ['weg'],
         'pl': ['platz'],
@@ -221,6 +222,9 @@ class QueryProcessor:
         query_text = ' '.join(t.text for t in tokens)
         for abbr, expansions in cls.SUFFIX_EXPANSIONS.items():
             if query_text.endswith(abbr):
+                # For 'st', require base to be at least 3 chars to avoid false positives
+                if abbr == 'st' and len(query_text) < 5:
+                    continue
                 base = query_text[:-len(abbr)]
                 for expansion in expansions:
                     variants.append(base + expansion)

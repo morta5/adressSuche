@@ -365,7 +365,8 @@ if SERVE_FRONTEND and frontend_path.exists():
 
 @app.on_event("startup")
 async def _on_startup():
-    init_db()
+    # init_db()  # Commented out for faster startup with existing database
+    pass
 
 
 @app.get("/")
@@ -467,29 +468,41 @@ async def autocomplete(
             "limit": stage_a_limit,
         }
 
-        # Build the SQL with UNION to use index on both queries
+        # Build the SQL with UNION to use index on multiple query variants
+        # Include expanded queries for suffix abbreviations (e.g., "str" -> "straße")
+        sql_parts = []
+        
+        # Original query
+        sql_parts.append("""
+            SELECT id, name, city, postal_code, latitude, longitude
+            FROM streets
+            WHERE name >= :q1_start AND name < :q1_end
+        """)
+        
+        # Normalized query
         if qc and qc != query:
-            # Both original name and normalized name
             params["q2_start"] = qc
             params["q2_end"] = prefix_end(qc)
-            sql = """
-                SELECT id, name, city, postal_code, latitude, longitude FROM (
-                    SELECT id, name, city, postal_code, latitude, longitude
-                    FROM streets
-                    WHERE name >= :q1_start AND name < :q1_end
-                    UNION
-                    SELECT id, name, city, postal_code, latitude, longitude
-                    FROM streets
-                    WHERE normalized_name >= :q2_start AND normalized_name < :q2_end
-                ) sub
-            """
-        else:
-            # Only original name
-            sql = """
+            sql_parts.append("""
                 SELECT id, name, city, postal_code, latitude, longitude
                 FROM streets
-                WHERE name >= :q1_start AND name < :q1_end
-            """
+                WHERE normalized_name >= :q2_start AND normalized_name < :q2_end
+            """)
+        
+        # Expanded query variants (e.g., "klosterstr" -> "klosterstrasse")
+        for idx, exp_norm in enumerate(expanded_norm[1:6], start=3):  # Limit to first 5 expansions
+            if exp_norm != qc and exp_norm != query.lower():
+                param_start = f"q{idx}_start"
+                param_end = f"q{idx}_end"
+                params[param_start] = exp_norm
+                params[param_end] = prefix_end(exp_norm)
+                sql_parts.append(f"""
+                    SELECT id, name, city, postal_code, latitude, longitude
+                    FROM streets
+                    WHERE normalized_name >= :{param_start} AND normalized_name < :{param_end}
+                """)
+        
+        sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({' UNION '.join(sql_parts)}) sub"
 
         if city:
             # Wrap with city filter - explicitly list columns instead of SELECT *
