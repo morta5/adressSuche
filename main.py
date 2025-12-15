@@ -212,8 +212,8 @@ async def _extract_city_from_query(
                 return street_query, detected_city
         
         # Strategy 3: Partial prefix match (handles "neum" for "neumünster")
-        # Only for single-word cities and if at least 4 characters
-        if n == 1 and len(potential_city) >= 4:
+        # Only for single-word cities and if at least 3 characters
+        if n == 1 and len(potential_city) >= 3:
             # Collect all matching cities
             matching_cities = []
             for known_city in known_cities:
