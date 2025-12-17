@@ -1,0 +1,72 @@
+name: "Copilot Setup Steps"
+
+# Automatically run the setup steps when they are changed to allow for easy validation, and
+# allow manual testing through the repository's "Actions" tab
+on:
+  workflow_dispatch: 
+  push:
+    paths:
+      - . github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths: 
+      - .github/workflows/copilot-setup-steps. yml
+
+jobs:
+  # The job MUST be called `copilot-setup-steps` or it will not be picked up by Copilot. 
+  copilot-setup-steps:
+    runs-on:  ubuntu-latest
+    
+    # Set the permissions to the lowest permissions possible needed for your steps. 
+    # Copilot will be given its own token for its operations.
+    permissions:
+      # If you want to clone the repository as part of your setup steps, for example to install dependencies,
+      # you'll need the `contents:  read` permission. If you don't clone the repository in your setup steps,
+      # Copilot will do this for you automatically after the steps complete.
+      contents: read
+    
+    # You can define any steps you want, and they will run before the agent starts. 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Download German address database
+        run: |
+          DB_PATH="autocomplete. db"
+          DB_DOWNLOAD_URL="https://cloud.farshidhakimy.de/s/cFGAdoaME3mwP5p/download"
+          
+          if [ !  -s "$DB_PATH" ]; then
+            echo "Database missing at $DB_PATH.  Downloading..."
+            curl -fL "$DB_DOWNLOAD_URL" -o "$DB_PATH"
+            echo "Database download complete"
+            
+            # Verify download was successful
+            if [ -s "$DB_PATH" ]; then
+              echo "Database ready ($(du -h $DB_PATH | cut -f1))"
+            else
+              echo "Error: Database download failed or file is empty"
+              exit 1
+            fi
+          else
+            echo "Using existing database at $DB_PATH ($(du -h $DB_PATH | cut -f1))"
+          fi
+      
+      - name:  Verify database integrity
+        run: |
+          python -c "
+          import sqlite3
+          conn = sqlite3.connect('autocomplete.db')
+          cursor = conn.cursor()
+          cursor.execute('SELECT COUNT(*) FROM streets')
+          count = cursor.fetchone()[0]
+          print(f'Database contains {count: ,} streets')
+          conn.close()
+          "
