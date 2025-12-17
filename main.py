@@ -1010,7 +1010,7 @@ async def autocomplete(
 @app.get("/validate", response_model=AddressValidationResponse)
 async def validate_address(
     street_name: str = Query(..., description="Street name"),
-    house_number: str = Query(..., description="House number"),
+    house_number: str = Query(..., description="House number (use '0' for streets without house numbers)"),
     city: Optional[str] = Query(None, description="City name"),
     latitude: Optional[float] = Query(
         None, description="Latitude for distance calculation"
@@ -1025,6 +1025,9 @@ async def validate_address(
     # Normalize city for flexible matching (handles "Henstedt Ulzburg" vs "Henstedt-Ulzburg" and "Kreis Plön" vs "Plön")
     city_norm = normalize_city_for_matching(city) if city else None
     city_variations = generate_city_variations(city) if city else []
+    
+    # Check if house_number is "0" - treat as request for street without house number
+    is_no_house_number_request = house_number.strip() == "0"
 
     # Try strict normalized match first
     stmt = select(Street).where(Street.normalized_search == target_norm)
@@ -1117,6 +1120,36 @@ async def validate_address(
             )
         )
 
+    # Handle house_number "0" request - return street without house number
+    if is_no_house_number_request:
+        if streets:
+            # Pick the closest street if lat/lng provided
+            st = streets[0]
+            resp = AddressValidationResponse(
+                exists=True,
+                address_id=None,
+                street_name=str(getattr(st, "name")),
+                city=str(getattr(st, "city")),
+                postal_code=str(getattr(st, "postal_code"))
+                if getattr(st, "postal_code") is not None
+                else None,
+                house_number="0",
+                latitude=float(getattr(st, "latitude")),
+                longitude=float(getattr(st, "longitude")),
+            )
+            if latitude is not None and longitude is not None:
+                resp.distance_km = round(
+                    haversine_distance(
+                        float(latitude),
+                        float(longitude),
+                        float(getattr(st, "latitude")),
+                        float(getattr(st, "longitude")),
+                    ),
+                    2,
+                )
+            return resp
+        return AddressValidationResponse(exists=False)
+    
     # First, collect all exact matches across all candidate streets
     exact_matches = []
     for st in streets:
@@ -1165,7 +1198,39 @@ async def validate_address(
             )
         return resp
     
-    # No exact match found - try soft validation with nearest house number
+    # No exact match found - check if street has no addresses (return house_number="0")
+    street_has_no_addresses = all(
+        len(list(await db.execute(select(Address).where(Address.street_id == st.id))).scalars().all()) == 0
+        for st in streets
+    ) if streets else False
+    
+    if street_has_no_addresses and streets:
+        st = streets[0]
+        resp = AddressValidationResponse(
+            exists=True,
+            address_id=None,
+            street_name=str(getattr(st, "name")),
+            city=str(getattr(st, "city")),
+            postal_code=str(getattr(st, "postal_code"))
+            if getattr(st, "postal_code") is not None
+            else None,
+            house_number="0",
+            latitude=float(getattr(st, "latitude")),
+            longitude=float(getattr(st, "longitude")),
+        )
+        if latitude is not None and longitude is not None:
+            resp.distance_km = round(
+                haversine_distance(
+                    float(latitude),
+                    float(longitude),
+                    float(getattr(st, "latitude")),
+                    float(getattr(st, "longitude")),
+                ),
+                2,
+            )
+        return resp
+    
+    # Try soft validation with nearest house number
     # Collect all possible soft matches from all candidate streets
     soft_matches = []
     for st in streets:
