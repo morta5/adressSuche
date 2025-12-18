@@ -33,6 +33,10 @@ class TestNearestHouseNumber:
         assert find_nearest_house_number("21", ["22", "130"]) == "22"
         assert find_nearest_house_number("50", ["48", "52"]) in {"48", "52"}
 
+    def test_prefers_close_over_far(self):
+        # Ensure nearby numbers beat far-out values like 110
+        assert find_nearest_house_number("17", ["110", "16", "18"]) in {"16", "18"}
+
     def test_empty_available(self):
         assert find_nearest_house_number("10", []) is None
         assert find_nearest_house_number("", ["1", "2"]) is None

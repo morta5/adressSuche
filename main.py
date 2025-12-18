@@ -34,6 +34,7 @@ from utils import (
     consonant_key,
     point_to_segment_distance,
     find_nearest_house_number,
+    parse_house_number,
 )
 
 # Constants for search quality thresholds
@@ -1499,15 +1500,39 @@ async def validate_address(
     
     # If we have soft matches, pick the closest one if lat/lng provided
     if soft_matches:
-        if latitude is not None and longitude is not None:
-            soft_matches = sorted(
-                soft_matches,
-                key=lambda x: haversine_distance(
-                    latitude, longitude,
-                    float(getattr(x[1], "latitude")),
-                    float(getattr(x[1], "longitude"))
+        # Prefer numerically closest house number to the requested one
+        target_num = parse_house_number(house_number)
+        if target_num is not None:
+            def _hn_distance(x: tuple[Street, Address]) -> int:
+                hn_num = parse_house_number(str(getattr(x[1], "house_number")))
+                return abs(target_num - hn_num) if hn_num is not None else 10_000_000
+
+            if latitude is not None and longitude is not None:
+                soft_matches = sorted(
+                    soft_matches,
+                    key=lambda x: (
+                        _hn_distance(x),
+                        haversine_distance(
+                            latitude, longitude,
+                            float(getattr(x[1], "latitude")),
+                            float(getattr(x[1], "longitude"))
+                        ),
+                    ),
                 )
-            )
+            else:
+                soft_matches = sorted(soft_matches, key=_hn_distance)
+        else:
+            # Fallback: prefer geographic proximity when available
+            if latitude is not None and longitude is not None:
+                soft_matches = sorted(
+                    soft_matches,
+                    key=lambda x: haversine_distance(
+                        latitude, longitude,
+                        float(getattr(x[1], "latitude")),
+                        float(getattr(x[1], "longitude"))
+                    )
+                )
+
         st, addr = soft_matches[0]
         resp = AddressValidationResponse(
             exists=True,
