@@ -88,6 +88,28 @@ TEST_QUERIES = [
         "expected_result": "Jungfernstieg",
         "expected_city": "Hamburg",
     },
+    # Additional typo/city coverage
+    {
+        "url": "/autocomplete",
+        "params": {"query": "kampst", "limit": 10, "latitude": 54.32730000000001, "longitude": 10.1234},
+        "expected_time_ms": 200,
+        "expected_result": "Kampstraße",
+        "expected_city": "Neumünster",
+    },
+    {
+        "url": "/autocomplete",
+        "params": {"query": "klosterstr", "limit": 10, "latitude": 54.32730000000001, "longitude": 10.1234},
+        "expected_time_ms": 200,
+        "expected_result": "Klosterstraße",
+        "expected_city": "Neumünster",
+    },
+    {
+        "url": "/autocomplete",
+        "params": {"query": "kieler straße", "limit": 10, "latitude": 54.081762457547626, "longitude": 9.983583614230158},
+        "expected_time_ms": 20,
+        "expected_result": "Kieler Straße",
+        "expected_city": "Neumünster",
+    },
 ]
 
 @pytest.mark.skipif(not _real_db_available(), reason="Real database not available")
