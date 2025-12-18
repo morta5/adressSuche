@@ -1,9 +1,9 @@
 import asyncio
 from sqlalchemy import text
 
-from v2.database import init_db, AsyncSessionLocal
-from v2.main import app
-from v2.models import Street
+from database import init_db, AsyncSessionLocal
+from main import app
+from models import Street
 
 
 async def seed_if_empty():

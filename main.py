@@ -46,8 +46,8 @@ TRIGRAM_MIN_LIMIT = 300  # Minimum results for trigram search
 PHONETIC_LIMIT_MULTIPLIER = 20  # Multiplier for phonetic search results
 PHONETIC_MIN_LIMIT = 100  # Minimum results for phonetic search
 PHONETIC_MAX_LIMIT = 250  # Maximum results for phonetic search
-RERANK_CANDIDATE_MULTIPLIER = 4  # Multiplier for reranking candidate pool
-RERANK_MIN_CANDIDATES = 50  # Minimum candidates for reranking
+RERANK_CANDIDATE_MULTIPLIER = 10  # Multiplier for reranking candidate pool
+RERANK_MIN_CANDIDATES = 100  # Minimum candidates for reranking
 
 # Unicode constants for prefix range queries
 UNICODE_MAX_CODEPOINT = 0x10FFFF  # Maximum valid Unicode code point
@@ -73,13 +73,13 @@ async def _geo_bounds(
 def _distance_penalized(score: float, geo_distance: Optional[float]) -> float:
     if geo_distance is None:
         return score
-    # Gentle penalty to keep relevant far results
+    # Penalty based on distance - much stronger to favor nearby results
     if score >= 0.7:
-        k = 220.0
+        k = 50.0  # Reduced from 220 - much stronger penalty
     elif score >= 0.5:
-        k = 150.0
+        k = 35.0  # Reduced from 150
     else:
-        k = 100.0
+        k = 25.0  # Reduced from 100
     penalty = 1.0 / (1.0 + (geo_distance / k))
     return max(0.1, score * penalty)
 
@@ -261,7 +261,8 @@ async def _extract_city_from_query(
                                     best_distance = distance
                                     best_city = city_name
                             
-                            if best_city:
+                            # Accept only if the nearest candidate city is reasonably close
+                            if best_city and best_distance <= 80.0:
                                 detected_city = best_city
                                 return street_query, detected_city
                     except Exception as e:
@@ -401,6 +402,43 @@ async def autocomplete(
     limit: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_async_db),
 ):
+    raw_query = query  # Preserve the original query for potential fallback
+
+    # Placeholders for query-dependent state populated by _prepare_query_state
+    qc = qn = qc_lower = query_titlecase = qc_titlecase = ""
+    qg_phonetic = qc_phonetic = ""
+    q_consonant = ""
+    expanded_queries: List[str] = []
+    expanded_norm: List[str] = []
+
+    def _prepare_query_state(q: str) -> None:
+        nonlocal query, qc, qn, qc_lower, query_titlecase, qc_titlecase
+        nonlocal qg_phonetic, qc_phonetic, q_consonant, expanded_queries, expanded_norm
+
+        query = q
+        qc = normalize_compact(query)
+        qn = normalize_string(query)
+        qc_lower = qc.lower() if qc else ""
+
+        # Convert query to Title Case for optimal database matching
+        # Preserve hyphens in the title-cased result for better matching with database
+        # E.g., "albert-schweitzer-straße" -> "Albert-Schweitzer-Straße" (not "Albert Schweitzer Straße")
+        if '-' in query:
+            parts = query.split('-')
+            titlecased_parts = [part.capitalize() for part in parts]
+            query_titlecase_local = '-'.join(titlecased_parts)
+        else:
+            query_titlecase_local = ' '.join(word.capitalize() for word in query.split())
+        query_titlecase = query_titlecase_local
+        qc_titlecase = normalize_compact(query_titlecase)
+
+        # Cache phonetic forms for reuse across stages
+        qg_phonetic, qc_phonetic = phonetic_forms(query)
+        q_consonant = consonant_key(query)
+
+        # Query expansion (abbr/suffix/hyphen)
+        expanded_queries = QueryProcessor.expand_query(query)
+        expanded_norm = list(dict.fromkeys([normalize_string(q) for q in expanded_queries]))
     # Extract city from query if not provided explicitly
     # E.g., "jungfernstieg hamburg" -> query="jungfernstieg", city="hamburg"
     if city is None:
@@ -412,18 +450,7 @@ async def autocomplete(
             city = detected_city
             logger.debug(f"Extracted city '{city}' from query, street query: '{query}'")
 
-    # Cache normalized forms to avoid recalculating
-    qc = normalize_compact(query)
-    qn = normalize_string(query)
-    qc_lower = qc.lower() if qc else ""
-
-    # Cache phonetic forms for reuse across stages
-    qg_phonetic, qc_phonetic = phonetic_forms(query)
-    q_consonant = consonant_key(query)
-
-    # Query expansion (abbr/suffix/hyphen)
-    expanded_queries = QueryProcessor.expand_query(query)
-    expanded_norm = list(dict.fromkeys([normalize_string(q) for q in expanded_queries]))
+    _prepare_query_state(query)
 
     processed_ids = set()
     candidates: list[tuple[StreetAutocompleteResponse, float]] = []
@@ -447,31 +474,31 @@ async def autocomplete(
 
         # Use UNION of two indexed range queries instead of OR (which causes full scan)
         # Adaptive limit based on query characteristics and geo coordinates:
-        # With ORDER BY distance in the SQL query, closest results come first,
-        # so we can use much lower limits when geo-coordinates are provided
-        # - With geo + ORDER BY distance: moderate limit (1000) is sufficient
-        # - No geo: small limit for performance
+        # When using ORDER BY distance, we need a small limit for fast performance
         if latitude is not None and longitude is not None:
-            # With distance ordering, 1000 is enough even for common names like Hauptstraße
+            # With distance ordering, ORDER BY is expensive - keep limit reasonable
+            # but big enough to ensure good recall
             is_multiword = ' ' in query.strip()
-            if is_multiword or len(query) >= 10:
-                stage_a_limit = 1000
+            if is_multiword:
+                stage_a_limit = 500  # Multi-word with coords
+            elif len(query) >= 10:
+                stage_a_limit = 600  # Long query with coords (e.g., hyphenated like Albert-Schweitzer-Straße)
             else:
-                stage_a_limit = limit * 8
+                stage_a_limit = max(400, limit * 20)  # Short query with coords
         else:
             stage_a_limit = limit * 4
         
         params: Dict[str, Any] = {
-            "q1_start": query,
-            "q1_end": prefix_end(query),
+            "q1_start": query_titlecase,  # Use title-cased query for DB matching
+            "q1_end": prefix_end(query_titlecase),
             "limit": stage_a_limit,
         }
 
         # Build the SQL with UNION to use index on both queries
-        if qc and qc != query:
+        if qc_titlecase and qc_titlecase != query_titlecase:
             # Both original name and normalized name
-            params["q2_start"] = qc
-            params["q2_end"] = prefix_end(qc)
+            params["q2_start"] = qc_titlecase
+            params["q2_end"] = prefix_end(qc_titlecase)
             sql = """
                 SELECT id, name, city, postal_code, latitude, longitude FROM (
                     SELECT id, name, city, postal_code, latitude, longitude
@@ -497,17 +524,25 @@ async def autocomplete(
             params["city"] = f"{city.lower()}%"
             sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({sql}) WHERE LOWER(city) LIKE :city"
 
-        # Order by distance when geo-coordinates are provided
-        if latitude is not None and longitude is not None:
-            params["user_lat"] = latitude
-            params["user_lon"] = longitude
-            sql += " ORDER BY ((latitude - :user_lat) * (latitude - :user_lat) + (longitude - :user_lon) * (longitude - :user_lon))"
-
+        # NOTE: Do NOT order by distance in SQL - it's too slow!
+        # Fetch results and sort in Python instead
         sql += " LIMIT :limit"
 
         try:
             res = await db.execute(text(sql), params)
-            for r in res.fetchall():
+            rows = res.fetchall()
+            
+            # Sort by distance in Python if geo-coordinates provided
+            if latitude is not None and longitude is not None:
+                rows = sorted(
+                    rows,
+                    key=lambda r: (
+                        (r._mapping["latitude"] - latitude) ** 2 +
+                        (r._mapping["longitude"] - longitude) ** 2
+                    )
+                )
+            
+            for r in rows:
                 sid = r._mapping["id"]
                 if sid in added:
                     continue
@@ -534,7 +569,8 @@ async def autocomplete(
                         latitude, longitude, resp.latitude, resp.longitude
                     )
                     resp.distance_km = round(d, 2)
-                    sc = _distance_penalized(sc, d)
+                    # NOTE: Do NOT apply distance penalty here!
+                    # Distance is only used for final reranking boost
                 local.append((resp, sc, sid))
         except Exception:
             pass
@@ -582,7 +618,8 @@ async def autocomplete(
                     latitude, longitude, resp.latitude, resp.longitude
                 )
                 resp.distance_km = round(d, 2)
-                base = _distance_penalized(base, d)
+                # NOTE: Do NOT apply distance penalty here!
+                # Distance is only used for final reranking boost
             local.append((resp, base, resp.street_id))
         return local
 
@@ -641,7 +678,8 @@ async def autocomplete(
                         latitude, longitude, resp.latitude, resp.longitude
                     )
                     resp.distance_km = round(d, 2)
-                    sc = _distance_penalized(sc, d)
+                    # NOTE: Do NOT apply distance penalty here!
+                    # Distance is only used for final reranking boost
                 local.append((resp, sc, sid))
         except Exception:
             pass
@@ -723,7 +761,8 @@ async def autocomplete(
                     latitude, longitude, resp.latitude, resp.longitude
                 )
                 resp.distance_km = round(d, 2)
-                base = _distance_penalized(base, d)
+                # NOTE: Do NOT apply distance penalty here!
+                # Distance is only used for final reranking boost
             local.append((resp, base, resp.street_id))
         return local
 
@@ -817,7 +856,9 @@ async def autocomplete(
 
         params: Dict[str, Any] = {
             "pattern": or_pattern,
-            "limit": FUZZY_TRIGRAM_CANDIDATE_LIMIT,
+            "limit": FUZZY_TRIGRAM_CANDIDATE_LIMIT
+            if city is None
+            else min(1200, FUZZY_TRIGRAM_CANDIDATE_LIMIT),
         }
 
         sql = [
@@ -881,7 +922,8 @@ async def autocomplete(
                     latitude, longitude, resp.latitude, resp.longitude
                 )
                 resp.distance_km = round(d, 2)
-                base = _distance_penalized(base, d)
+                # NOTE: Do NOT apply distance penalty here!
+                # Distance is only used for final reranking boost
             local.append((resp, base, resp.street_id))
 
         # Sort by score
@@ -904,28 +946,25 @@ async def autocomplete(
         sc >= HIGH_QUALITY_SCORE_THRESHOLD for _, sc, _ in stage_a
     )
 
-    # Stage B: Trigram prefix search (fast, uses FTS5 index)
-    # Only run if Stage A didn't find enough results
-    stage_b = []
-    if len(stage_a) < limit:
-        stage_b = await trigram_search()
-
-    # If city filter was applied but we got no results, try again without city filter
-    # This handles cases where city name doesn't match exactly in database
-    if original_city and len(stage_a) == 0 and len(stage_b) == 0:
-        logger.debug(f"No results found with city filter '{original_city}', retrying without city filter")
-        city = None  # Temporarily remove city filter
-        stage_a_fallback = await exact_prefix()
-        stage_b_fallback = await trigram_search()
-        # Restore city filter for subsequent stages
-        city = original_city
-        # Merge fallback results (they will be penalized by distance if geo coords provided)
-        stage_a.extend(stage_a_fallback)
-        stage_b.extend(stage_b_fallback)
+    city_in_raw_query = bool(city) and city.lower() in raw_query.lower()
+    if original_city and not city_in_raw_query and not stage_a_has_matches:
+        # Low-confidence city extraction (city text not in raw query) with no exact hits – drop city early
+        city = None
+        original_city = None
+        _prepare_query_state(raw_query)
+        stage_a = await exact_prefix()
         stage_a_has_matches = len(stage_a) > 0
         stage_a_has_good_match = any(
             sc >= HIGH_QUALITY_SCORE_THRESHOLD for _, sc, _ in stage_a
         )
+
+    # Stage B: Trigram prefix search (fast, uses FTS5 index)
+    # Only run if Stage A didn't find any high-quality results
+    # Skip expensive fuzzy search if we already have exact prefix matches
+    stage_b = []
+    stage_g = []  # initialize for later use (may stay empty)
+    if not stage_a_has_good_match:
+        stage_b = await trigram_search()
 
     # Early exit check after fast stages
     fast_results = [*stage_a, *stage_b]
@@ -942,6 +981,43 @@ async def autocomplete(
 
     # Combined results
     all_fast_results = [*fast_results, *stage_g]
+
+    # If city filter yields zero candidates, retry without city but keep city for reranking
+    if original_city and not all_fast_results:
+        logger.debug(
+            "City filter '%s' yielded no candidates, retrying without city filter",
+            original_city,
+        )
+        restored_query = raw_query
+        raw_lower = raw_query.lower()
+        target_lower = original_city.lower()
+        if raw_lower.endswith(target_lower):
+            restored_query = raw_query[: -len(original_city)].strip()
+        city = None
+        original_city = None
+        _prepare_query_state(restored_query or raw_query)
+
+        stage_a = await exact_prefix()
+        stage_a_has_matches = len(stage_a) > 0
+        stage_a_has_good_match = any(
+            sc >= HIGH_QUALITY_SCORE_THRESHOLD for _, sc, _ in stage_a
+        )
+
+        stage_b = []
+        if not stage_a_has_good_match:
+            stage_b = await trigram_search()
+
+        fast_results = [*stage_a, *stage_b]
+        has_good_fast_results = len(fast_results) >= limit or (
+            stage_a_has_matches and stage_a_has_good_match
+        )
+
+        stage_g = []
+        if not has_good_fast_results:
+            stage_g = await fuzzy_trigram_search()
+
+        all_fast_results = [*fast_results, *stage_g]
+
     high_score_count = sum(
         1 for _, sc, _ in all_fast_results if sc >= HIGH_QUALITY_SCORE_THRESHOLD
     )
@@ -974,6 +1050,7 @@ async def autocomplete(
         *stage_e,
     ]
 
+
     # Dedup + keep best score
     by_id: Dict[int, tuple[StreetAutocompleteResponse, float]] = {}
     for resp, sc, sid in flat:
@@ -994,12 +1071,34 @@ async def autocomplete(
         ph = phonetic_match_score(query, resp.name)
         _, fuzz = calculate_fuzzy_score_normalized(qn_norm, normalize_string(resp.name))
         combined = min(1.0, 0.55 * base + 0.30 * ph + 0.15 * fuzz)
+
+        # Strongly favor results in the requested/detected city if provided
+        if original_city:
+            resp_city_l = (resp.city or "").lower()
+            target_city_l = original_city.lower()
+            if resp_city_l.startswith(target_city_l):
+                combined = min(1.0, combined * 1.1)
+            else:
+                combined = combined * 0.6
+        # Apply distance penalty ONLY when no city filter is present.
+        # If the user specified (or we detected) a city, ranking should rely on text/phonetic match,
+        # not geo distance from the provided coordinates.
         if (
             latitude is not None
             and longitude is not None
             and resp.distance_km is not None
+            and city is None
+            and original_city is None
         ):
-            combined = _distance_penalized(combined, resp.distance_km)
+            # Strong distance penalty to favor nearby results when no city is given
+            if combined >= 0.7:
+                k = 30.0
+            elif combined >= 0.5:
+                k = 20.0
+            else:
+                k = 15.0
+            distance_penalty = 1.0 / (1.0 + (resp.distance_km / k))
+            combined = max(0.1, combined * distance_penalty)
         resp.match_score = combined
         reranked.append((resp, combined))
 
@@ -1010,7 +1109,7 @@ async def autocomplete(
 @app.get("/validate", response_model=AddressValidationResponse)
 async def validate_address(
     street_name: str = Query(..., description="Street name"),
-    house_number: str = Query(..., description="House number"),
+    house_number: str = Query(..., description="House number (use '0' for streets without house numbers)"),
     city: Optional[str] = Query(None, description="City name"),
     latitude: Optional[float] = Query(
         None, description="Latitude for distance calculation"
@@ -1025,6 +1124,9 @@ async def validate_address(
     # Normalize city for flexible matching (handles "Henstedt Ulzburg" vs "Henstedt-Ulzburg" and "Kreis Plön" vs "Plön")
     city_norm = normalize_city_for_matching(city) if city else None
     city_variations = generate_city_variations(city) if city else []
+    
+    # Check if house_number is "0" - treat as request for street without house number
+    is_no_house_number_request = house_number.strip() == "0"
 
     # Try strict normalized match first
     stmt = select(Street).where(Street.normalized_search == target_norm)
@@ -1117,6 +1219,36 @@ async def validate_address(
             )
         )
 
+    # Handle house_number "0" request - return street without house number
+    if is_no_house_number_request:
+        if streets:
+            # Pick the closest street if lat/lng provided
+            st = streets[0]
+            resp = AddressValidationResponse(
+                exists=True,
+                address_id=None,
+                street_name=str(getattr(st, "name")),
+                city=str(getattr(st, "city")),
+                postal_code=str(getattr(st, "postal_code"))
+                if getattr(st, "postal_code") is not None
+                else None,
+                house_number="0",
+                latitude=float(getattr(st, "latitude")),
+                longitude=float(getattr(st, "longitude")),
+            )
+            if latitude is not None and longitude is not None:
+                resp.distance_km = round(
+                    haversine_distance(
+                        float(latitude),
+                        float(longitude),
+                        float(getattr(st, "latitude")),
+                        float(getattr(st, "longitude")),
+                    ),
+                    2,
+                )
+            return resp
+        return AddressValidationResponse(exists=False)
+    
     # First, collect all exact matches across all candidate streets
     exact_matches = []
     for st in streets:
@@ -1165,7 +1297,43 @@ async def validate_address(
             )
         return resp
     
-    # No exact match found - try soft validation with nearest house number
+    # No exact match found - check if street has no addresses (return house_number="0")
+    # Check if any street has addresses
+    street_has_no_addresses = True
+    if streets:
+        for st in streets:
+            res = await db.execute(select(Address).where(Address.street_id == st.id).limit(1))
+            if res.scalars().first():
+                street_has_no_addresses = False
+                break
+    
+    if street_has_no_addresses and streets:
+        st = streets[0]
+        resp = AddressValidationResponse(
+            exists=True,
+            address_id=None,
+            street_name=str(getattr(st, "name")),
+            city=str(getattr(st, "city")),
+            postal_code=str(getattr(st, "postal_code"))
+            if getattr(st, "postal_code") is not None
+            else None,
+            house_number="0",
+            latitude=float(getattr(st, "latitude")),
+            longitude=float(getattr(st, "longitude")),
+        )
+        if latitude is not None and longitude is not None:
+            resp.distance_km = round(
+                haversine_distance(
+                    float(latitude),
+                    float(longitude),
+                    float(getattr(st, "latitude")),
+                    float(getattr(st, "longitude")),
+                ),
+                2,
+            )
+        return resp
+    
+    # Try soft validation with nearest house number
     # Collect all possible soft matches from all candidate streets
     soft_matches = []
     for st in streets:

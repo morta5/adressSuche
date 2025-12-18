@@ -401,6 +401,23 @@ pytest
 # Run specific test file
 pytest test_api_cases.py -v
 
+
+### Real database (optional)
+
+Some integration tests are skipped unless a real SQLite database is present. Place the database file in the workspace root as `autocomplete_v3.db` (or `autocomplete_v2.db`). Ensure the file size is > 1MB to enable tests.
+
+If you have a remote URL for the DB, you can download it (example):
+
+```bash
+# Replace <DB_URL> with your actual download URL
+curl -L -o autocomplete_v3.db <DB_URL>
+```
+
+Then re-run:
+
+```bash
+pytest -q
+```
 # Run with database (if available)
 pytest test_api_cases.py -v -k "not skipif"
 ```
