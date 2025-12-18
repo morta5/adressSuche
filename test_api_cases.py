@@ -127,6 +127,16 @@ TEST_CASES: List[APITestCase] = [
         max_time_ms=500,  # Allow more time for complex fuzzy search
         description="Typo query: 'gretenweg' should find 'Grethenweg Frankfurt' (missing 'h')",
     ),
+    APITestCase(
+        name="klsoterstrasse_neumuenster_typo",
+        query="klsoterstraße",
+        latitude=54.0863,
+        longitude=9.9757,
+        expected_result="Klosterstraße",
+        expected_city="Neumünster",
+        max_time_ms=250,
+        description="Typo query: 'klsoterstraße' (transposition) should find 'Klosterstraße' in Neumünster",
+    ),
     # City-in-query parsing
     APITestCase(
         name="jungfernstieg_hamburg",

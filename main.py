@@ -37,7 +37,7 @@ from utils import (
 )
 
 # Constants for search quality thresholds
-HIGH_QUALITY_SCORE_THRESHOLD = 0.7  # Score threshold for early exit optimization
+HIGH_QUALITY_SCORE_THRESHOLD = 0.65  # Score threshold for early exit optimization
 FUZZY_TRIGRAM_CANDIDATE_LIMIT = 3000  # Max candidates to fetch from trigram search
 
 # Performance tuning constants for stage limits
@@ -329,11 +329,13 @@ def _select_fuzzy_trigrams(all_trigrams: list[str]) -> list[str]:
         mid_tris = filtered[mid_idx - 1 : mid_idx + 2]
         return list(dict.fromkeys(start_tris + mid_tris))  # Remove dupes
     elif len(filtered) >= TRIGRAM_MEDIUM_THRESHOLD:
-        # Medium strings: pick from start and middle
-        start_tris = filtered[0:2]
+        # Medium strings: use a wider net (start + middle + end) to better
+        # tolerate transposition typos while keeping the pattern selective.
+        start_tris = filtered[0:3]
         mid_idx = len(filtered) // 2
         mid_tris = filtered[mid_idx : mid_idx + 2]
-        return list(dict.fromkeys(start_tris + mid_tris))
+        end_tris = filtered[-2:]
+        return list(dict.fromkeys(start_tris + mid_tris + end_tris))
     elif len(filtered) >= TRIGRAM_SHORT_THRESHOLD:
         # Short strings: pick first few
         return filtered[0:3]
@@ -479,12 +481,21 @@ async def autocomplete(
             # With distance ordering, ORDER BY is expensive - keep limit reasonable
             # but big enough to ensure good recall
             is_multiword = ' ' in query.strip()
+            
+            # Detect very common street names that need larger pools
+            common_names = {'haupt', 'bahnhof', 'kirch', 'schul', 'mark', 'berg'}
+            is_common = any(query.lower().startswith(name) for name in common_names)
+            
             if is_multiword:
-                stage_a_limit = 500  # Multi-word with coords
-            elif len(query) >= 10:
-                stage_a_limit = 600  # Long query with coords (e.g., hyphenated like Albert-Schweitzer-Straße)
+                stage_a_limit = 50  # Multi-word with coords - keep small for performance
+            elif is_common:
+                stage_a_limit = 300  # Common street names need large pool
+            elif len(query) <= 6:
+                stage_a_limit = 60  # Very short prefixes
+            elif len(query) >= 12:
+                stage_a_limit = 40  # Longer queries are usually more specific - smaller pool
             else:
-                stage_a_limit = max(400, limit * 20)  # Short query with coords
+                stage_a_limit = 50  # Medium-length queries
         else:
             stage_a_limit = limit * 4
         
@@ -518,11 +529,54 @@ async def autocomplete(
                 WHERE name >= :q1_start AND name < :q1_end
             """
 
+        geo_filter = ""
+        if (
+            latitude is not None
+            and longitude is not None
+            and city is None
+            and original_city is None
+        ):
+            # Skip geo filtering for very specific queries (long, unique names)
+            # These can be found quickly via index without geo constraints
+            if len(query) >= 11 and ' ' not in query:
+                # Long single-word queries are specific enough - no geo filtering needed
+                geo_filter = ""
+            else:
+                # Narrow to a local bounding box to ensure nearby matches for very common names (e.g., Hauptstraße)
+                # Detect very common street names that need larger radius
+                common_names = {'haupt', 'bahnhof', 'kirch', 'schul', 'mark', 'berg'}
+                is_common = any(query.lower().startswith(name) for name in common_names)
+                
+                if is_common:
+                    geo_radius = 45.0  # Common names need wider radius
+                elif len(qc) <= 6:
+                    geo_radius = 35.0  # Short queries - moderate radius
+                elif " " in query:
+                    geo_radius = 32.0  # Multi-word queries - tighter radius
+                else:
+                    geo_radius = 35.0  # Default moderate radius
+                
+                min_lat, max_lat, min_lon, max_lon = await _geo_bounds(latitude, longitude, geo_radius)
+                params.update(
+                    {
+                        "min_lat": min_lat,
+                        "max_lat": max_lat,
+                        "min_lon": min_lon,
+                        "max_lon": max_lon,
+                    }
+                )
+                geo_filter = "latitude BETWEEN :min_lat AND :max_lat AND longitude BETWEEN :min_lon AND :max_lon"
+
         if city:
             # Wrap with city filter - explicitly list columns instead of SELECT *
             # Use LOWER for case-insensitive matching (handles "neum" matching "Neumünster")
             params["city"] = f"{city.lower()}%"
-            sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({sql}) WHERE LOWER(city) LIKE :city"
+            filters = ["LOWER(city) LIKE :city"]
+            if geo_filter:
+                filters.append(geo_filter)
+            sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({sql}) WHERE " + " AND ".join(filters)
+        elif geo_filter:
+            sql = f"SELECT id, name, city, postal_code, latitude, longitude FROM ({sql}) WHERE {geo_filter}"
 
         # NOTE: Do NOT order by distance in SQL - it's too slow!
         # Fetch results and sort in Python instead
@@ -555,6 +609,8 @@ async def autocomplete(
                     sc = 1.0
                 else:
                     sc = 0.97
+                if "straße" in name_lower or "strasse" in name_lower:
+                    sc += 0.02  # prefer canonical street suffix
                 resp = StreetAutocompleteResponse(
                     street_id=sid,
                     name=name,
@@ -581,7 +637,7 @@ async def autocomplete(
         if len(qc) < 2:
             return []
         # Use performance tuning constants
-        trigram_limit = max(limit * TRIGRAM_LIMIT_MULTIPLIER, TRIGRAM_MIN_LIMIT)
+        trigram_limit = max(limit * 10, 150)
         params: Dict[str, Any] = {"pattern": f"{qc}*", "limit": trigram_limit}
         sql = [
             "SELECT s.id AS street_id, s.name, s.city, s.postal_code, s.latitude, s.longitude,",
@@ -604,6 +660,8 @@ async def autocomplete(
             )  # fallback
             base = 1.0 / (1.0 + (float(r._mapping["rnk"]) / 6.0))
             base += _prefix_bonus(qc, nn)
+            if "straße" in nn.lower() or "strasse" in nn.lower():
+                base += 0.02  # prefer canonical street suffix
             resp = StreetAutocompleteResponse(
                 street_id=r._mapping["street_id"],
                 name=r._mapping["name"],
@@ -849,17 +907,48 @@ async def autocomplete(
 
         # Select trigrams from START, MIDDLE, and END regions
         # This handles typos at any position by ensuring we match on multiple regions
-        or_trigrams = _select_fuzzy_trigrams(all_trigrams)
+        selected_trigrams = _select_fuzzy_trigrams(all_trigrams)
+        
+        # Also include a few suffix trigrams to improve overlap with typo variations
+        # This helps catch cases like "klsoter" vs "kloster" where suffix overlap matters
+        suffix_trigrams = all_trigrams[-3:] if len(all_trigrams) > 6 else []
+        or_trigrams = list(dict.fromkeys(selected_trigrams + suffix_trigrams))
 
         # Use OR matching - will match if ANY trigram matches
         or_pattern = " OR ".join(or_trigrams)
 
         params: Dict[str, Any] = {
             "pattern": or_pattern,
-            "limit": FUZZY_TRIGRAM_CANDIDATE_LIMIT
+            "limit": 150  # Reduced limit for better performance with suffix trigrams
             if city is None
-            else min(1200, FUZZY_TRIGRAM_CANDIDATE_LIMIT),
+            else min(120, FUZZY_TRIGRAM_CANDIDATE_LIMIT),
         }
+
+        # If geo coords are provided, constrain the search to a local bounding box
+        # to avoid distant high-frequency matches dominating the candidate set.
+        geo_clause = ""
+        if (
+            latitude is not None
+            and longitude is not None
+            and city is None
+            and original_city is None
+        ):
+            # Use a generous radius to keep distant-but-correct matches (e.g., rare names)
+            min_lat, max_lat, min_lon, max_lon = await _geo_bounds(
+                latitude, longitude, 250.0
+            )
+            params.update(
+                {
+                    "min_lat": min_lat,
+                    "max_lat": max_lat,
+                    "min_lon": min_lon,
+                    "max_lon": max_lon,
+                }
+            )
+            geo_clause = (
+                " AND s.latitude BETWEEN :min_lat AND :max_lat"
+                " AND s.longitude BETWEEN :min_lon AND :max_lon"
+            )
 
         sql = [
             "SELECT s.id AS street_id, s.name, s.city, s.postal_code, s.latitude, s.longitude,",
@@ -870,6 +959,8 @@ async def autocomplete(
         if city:
             sql.append("AND LOWER(s.city) LIKE :city")
             params["city"] = f"{city.lower()}%"
+        if geo_clause:
+            sql.append(geo_clause)
         # ORDER BY bm25 to get best matches first (not rowid order)
         sql.append("ORDER BY bm25(street_trigram) ASC LIMIT :limit")
 
@@ -928,7 +1019,7 @@ async def autocomplete(
 
         # Sort by score
         local.sort(key=lambda t: (-t[1], t[0].name))
-        return local[: max(limit * 5, 50)]
+        return local[: max(limit * 2, 20)]
 
     # Run retrieval stages with early exit optimization
     # Fast stages first, skip slow stages if we have enough results
@@ -963,14 +1054,26 @@ async def autocomplete(
     # Skip expensive fuzzy search if we already have exact prefix matches
     stage_b = []
     stage_g = []  # initialize for later use (may stay empty)
-    if not stage_a_has_good_match:
+    if not stage_a_has_matches:  # Changed: skip if we have ANY matches
         stage_b = await trigram_search()
 
     # Early exit check after fast stages
     fast_results = [*stage_a, *stage_b]
-    has_good_fast_results = len(fast_results) >= limit or (
-        stage_a_has_matches and stage_a_has_good_match
-    )
+    
+    # Check if we have nearby high-quality results when geo coords are provided
+    has_nearby_results = False
+    if latitude is not None and longitude is not None and fast_results:
+        # Check if any result is within reasonable distance (< 20km) with high quality score
+        for resp, score, _ in fast_results:
+            if resp.latitude and resp.longitude:
+                dist_km = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                if dist_km < 20.0 and score >= HIGH_QUALITY_SCORE_THRESHOLD:
+                    has_nearby_results = True
+                    break
+    
+    has_good_fast_results = (
+        len(fast_results) >= limit and (has_nearby_results or latitude is None)
+    ) or (stage_a_has_matches and stage_a_has_good_match)
 
     # Stage G: Fuzzy trigram OR (moderate speed, good for typos)
     # ONLY run if we don't have good results from exact matching
@@ -1062,15 +1165,43 @@ async def autocomplete(
 
     # Optional phonetic + normalized fuzzy reranking on top K candidates
     # Use performance tuning constants for candidate pool size
+    # Skip expensive reranking if we have high-quality exact matches
+    skip_expensive_rerank = (
+        stage_a_has_good_match
+        and len(stage_a) >= limit
+        and not stage_b
+        and not stage_g
+    )
+    
+    rerank_cap = max(limit * RERANK_CANDIDATE_MULTIPLIER, RERANK_MIN_CANDIDATES)
+    if len(qc) <= 6:
+        rerank_cap = max(limit * 2, 20)
+    elif " " in query:
+        rerank_cap = max(limit * 3, 30)
     top_candidates = sorted(by_id.values(), key=lambda t: t[1], reverse=True)[
-        : max(limit * RERANK_CANDIDATE_MULTIPLIER, RERANK_MIN_CANDIDATES)
+        : rerank_cap
     ]
     reranked: list[tuple[StreetAutocompleteResponse, float]] = []
     qn_norm = normalize_string(query)
     for resp, base in top_candidates:
-        ph = phonetic_match_score(query, resp.name)
-        _, fuzz = calculate_fuzzy_score_normalized(qn_norm, normalize_string(resp.name))
-        combined = min(1.0, 0.55 * base + 0.30 * ph + 0.15 * fuzz)
+        if skip_expensive_rerank:
+            # Fast path: skip phonetic/fuzzy for exact matches
+            combined = base
+        else:
+            ph = phonetic_match_score(query, resp.name)
+            _, fuzz = calculate_fuzzy_score_normalized(qn_norm, normalize_string(resp.name))
+            combined = min(1.0, 0.55 * base + 0.30 * ph + 0.15 * fuzz)
+
+        # Local proximity boost when coordinates are provided (no city filter)
+        if (
+            latitude is not None
+            and longitude is not None
+            and resp.distance_km is not None
+        ):
+            if resp.distance_km <= 30:
+                combined = min(1.0, combined * 1.2)
+            elif resp.distance_km <= 60:
+                combined = min(1.0, combined * 1.05)
 
         # Strongly favor results in the requested/detected city if provided
         if original_city:
@@ -1089,6 +1220,7 @@ async def autocomplete(
             and resp.distance_km is not None
             and city is None
             and original_city is None
+            and combined < 0.85  # Do not penalize strong textual matches
         ):
             # Strong distance penalty to favor nearby results when no city is given
             if combined >= 0.7:
@@ -1099,10 +1231,20 @@ async def autocomplete(
                 k = 15.0
             distance_penalty = 1.0 / (1.0 + (resp.distance_km / k))
             combined = max(0.1, combined * distance_penalty)
+        # Prefer canonical street suffix slightly in final score to break ties for short prefixes
+        if "straße" in (resp.name or "").lower() or "strasse" in (resp.name or "").lower():
+            combined = min(1.1, combined + 0.02)
         resp.match_score = combined
         reranked.append((resp, combined))
 
-    reranked.sort(key=lambda t: (-(t[1]), t[0].name, t[0].city))
+    reranked.sort(
+        key=lambda t: (
+            -(t[1]),
+            t[0].distance_km if t[0].distance_km is not None else float("inf"),
+            t[0].name,
+            t[0].city,
+        )
+    )
     return [r[0] for r in reranked[:limit]]
 
 
