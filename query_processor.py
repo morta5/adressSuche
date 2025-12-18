@@ -147,6 +147,15 @@ class QueryProcessor:
         if not tokens:
             return variants
         
+        # Remove common suffixes from the query for better matching
+        # E.g., "kieler straße" -> "kieler", "kampstraße" -> "kampstr"
+        if tokens and tokens[-1].is_suffix:
+            # Remove the last suffix token
+            base_tokens = tokens[:-1]
+            if base_tokens:
+                base_query = ' '.join(t.text for t in base_tokens)
+                variants.insert(0, base_query)  # Prioritize suffix-removed version
+        
         # Expand abbreviations
         abbr_variants = cls._expand_abbreviations(tokens)
         variants.extend(abbr_variants)

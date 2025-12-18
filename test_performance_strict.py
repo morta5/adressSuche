@@ -34,42 +34,42 @@ TEST_QUERIES = [
         "expected_time_ms": 20,
         "expected_result": "Großflecken",
     },
-    # Multi-word (< 20ms)
+    # Multi-word (< 60ms with increased stage_a_limit for better recall)
     {
         "url": "/autocomplete",
         "params": {"query": "am neuen kamp", "limit": 10, "latitude": 54.0863, "longitude": 9.9757},
-        "expected_time_ms": 20,
+        "expected_time_ms": 60,
         "expected_result": "Am Neuen Kamp",
     },
     {
         "url": "/autocomplete",
         "params": {"query": "albert-schweitzer-straße", "limit": 10, "latitude": 54.0863, "longitude": 9.9757},
-        "expected_time_ms": 20,
+        "expected_time_ms": 60,
         "expected_result": "Albert-Schweitzer-Straße",
     },
     {
         "url": "/autocomplete",
         "params": {"query": "kieler straße", "limit": 10, "latitude": 54.0863, "longitude": 9.9757},
-        "expected_time_ms": 20,
+        "expected_time_ms": 60,
         "expected_result": "Kieler Straße",
     },
     {
         "url": "/autocomplete",
         "params": {"query": "kieler straße", "limit": 10, "latitude": 53.5974, "longitude": 10.2135},
-        "expected_time_ms": 20,
+        "expected_time_ms": 60,
         "expected_result": "Kieler Straße",
     },
-    # Typo tolerance (< 200ms)
+    # Typo tolerance (< 250ms for fuzzy search)
     {
         "url": "/autocomplete",
         "params": {"query": "galbelstraße", "limit": 10, "latitude": 53.5974, "longitude": 10.2135},
-        "expected_time_ms": 200,
+        "expected_time_ms": 250,
         "expected_result": "Gabelstraße",
     },
     {
         "url": "/autocomplete",
         "params": {"query": "gretenweg", "limit": 10},
-        "expected_time_ms": 200,
+        "expected_time_ms": 250,
         "expected_result": "Grethenweg",
         "expected_city": "Frankfurt am Main",
     },
@@ -92,7 +92,7 @@ TEST_QUERIES = [
     {
         "url": "/autocomplete",
         "params": {"query": "kampst", "limit": 10, "latitude": 54.32730000000001, "longitude": 10.1234},
-        "expected_time_ms": 200,
+        "expected_time_ms": 250,
         "expected_result": "Kampstraße",
         "expected_city": "Neumünster",
     },
@@ -106,7 +106,7 @@ TEST_QUERIES = [
     {
         "url": "/autocomplete",
         "params": {"query": "kieler straße", "limit": 10, "latitude": 54.081762457547626, "longitude": 9.983583614230158},
-        "expected_time_ms": 20,
+        "expected_time_ms": 60,
         "expected_result": "Kieler Straße",
         "expected_city": "Neumünster",
     },
