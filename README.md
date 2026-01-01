@@ -418,11 +418,12 @@ Then re-run:
 ```bash
 pytest -q
 ```
-# Run with database (if available)
-pytest test_api_cases.py -v -k "not skipif"
+### Run with database (if available)
+```bash
+test test_api_cases.py -v -k "not skipif"
 ```
 
-## 📝 License
+# 📝 License
 
 **Project Code**: GNU Affero General Public License v3.0 (AGPLv3)
 
