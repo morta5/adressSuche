@@ -1573,6 +1573,16 @@ _VOICE_SUFFIX_RE = _re.compile(
     _re.IGNORECASE,
 )
 
+# Leading preposition+article combos that STT/LLM may prepend to the root name.
+# "In der Rohnstraße" → root is "Rohn", not "In der Rohn".
+_VOICE_PREFIX_RE = _re.compile(
+    r"^(in\s+der|in\s+den|in\s+dem|an\s+der|an\s+den|an\s+dem|am|"
+    r"auf\s+der|auf\s+dem|auf\s+den|beim|im|zum|zur|"
+    r"hinter\s+der|hinter\s+dem|unter\s+der|unter\s+dem|"
+    r"vor\s+der|vor\s+dem|neben\s+der|neben\s+dem)\s+",
+    _re.IGNORECASE,
+)
+
 _VOICE_GEO_SCAN_RADIUS_KM = 20.0
 _VOICE_GEO_SCAN_MIN_SCORE = 0.65
 _VOICE_GEO_SCAN_LIMIT = 2000
@@ -1581,6 +1591,11 @@ _VOICE_GEO_SCAN_LIMIT = 2000
 def _strip_voice_suffix(name: str) -> str:
     """Remove trailing German street-type word for root-only phonetic comparison."""
     return _VOICE_SUFFIX_RE.sub("", name).strip()
+
+
+def _strip_voice_prefix(name: str) -> str:
+    """Remove leading German preposition+article so 'In der Rohnstraße' → 'Rohnstraße'."""
+    return _VOICE_PREFIX_RE.sub("", name).strip()
 
 
 async def _phonetic_geo_scan(
@@ -1602,16 +1617,30 @@ async def _phonetic_geo_scan(
     """
     min_lat, max_lat, min_lon, max_lon = await _geo_bounds(lat, lon, _VOICE_GEO_SCAN_RADIUS_KM)
 
-    # Pre-filter: same first letter as the query root (handles ~80% reduction).
-    query_root = _strip_voice_suffix(street_name)
-    first_letter = query_root[:1].upper() if query_root else ""
+    # Strip leading prepositions before root extraction so "In der Rohnstraße"
+    # compares as "Rohn" against "Roon", not as "In der Rohn" against "Roon".
+    street_name_stripped = _strip_voice_prefix(street_name)
+    query_root = _strip_voice_suffix(street_name_stripped)
+    # Pre-filter: first-letter LIKE to reduce candidates ~80%.
+    # When a preposition was stripped we need BOTH the stripped first letter
+    # (e.g. "R" for "Rohnstraße") AND the raw first letter (e.g. "I" for
+    # "In der …") so we don't miss real streets like "In der Heide" whose DB
+    # name actually starts with the preposition.
+    raw_first = street_name[:1].upper() if street_name else ""
+    stripped_first = query_root[:1].upper() if query_root else ""
 
     stmt = select(Street).where(
         Street.latitude.between(min_lat, max_lat),
         Street.longitude.between(min_lon, max_lon),
     )
-    if first_letter:
-        stmt = stmt.where(Street.name.like(f"{first_letter}%"))
+    if stripped_first and stripped_first != raw_first:
+        # Preposition was stripped — include both first letters.
+        stmt = stmt.where(or_(
+            Street.name.like(f"{stripped_first}%"),
+            Street.name.like(f"{raw_first}%"),
+        ))
+    elif stripped_first:
+        stmt = stmt.where(Street.name.like(f"{stripped_first}%"))
     if city_norm and city_variations:
         city_conditions = [Street.city.ilike(f"{v}%") for v in city_variations]
         stmt = stmt.where(or_(*city_conditions))
@@ -1626,7 +1655,7 @@ async def _phonetic_geo_scan(
     def _score_candidates():
         results: List[Tuple[float, float, Any]] = []
         for st in candidates:
-            candidate_root = _strip_voice_suffix(str(getattr(st, "name")))
+            candidate_root = _strip_voice_suffix(_strip_voice_prefix(str(getattr(st, "name"))))
             score = phonetic_match_score(query_root, candidate_root)
             if score >= _VOICE_GEO_SCAN_MIN_SCORE:
                 dist = haversine_distance(
