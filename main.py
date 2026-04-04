@@ -19,7 +19,7 @@ from phonetic import phonetic_match_score, phonetic_forms
 from bktree import levenshtein_distance
 
 from database import get_async_db, init_db
-from models import Street, Address, StreetNameVariant
+from models import Street, Address
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1022,52 +1022,6 @@ async def autocomplete(
         local.sort(key=lambda t: (-t[1], t[0].name))
         return local[: max(limit * 2, 20)]
 
-    # Stage TTS: Search TTS-derived phonetic variants table
-    async def tts_variant_search() -> list[tuple[StreetAutocompleteResponse, float, int]]:
-        """Query street_name_variants for TTS/Voxtral-derived alternative spellings."""
-        if len(qc) < 2:
-            return []
-        qc_prefix = qc.lower()
-        params: Dict[str, Any] = {"prefix": f"{qc_prefix}%", "limit": max(limit * 4, 40)}
-        sql_parts = [
-            "SELECT s.id, s.name, s.city, s.postal_code, s.latitude, s.longitude,",
-            "       v.variant_text",
-            "FROM street_name_variants v",
-            "JOIN streets s ON s.name = v.original_name",
-            "WHERE LOWER(v.normalized_variant) LIKE :prefix",
-        ]
-        if city:
-            sql_parts.append("AND LOWER(s.city) LIKE :city")
-            params["city"] = f"{city.lower()}%"
-        sql_parts.append("LIMIT :limit")
-        try:
-            rows = (await db.execute(text("\n".join(sql_parts)), params)).fetchall()
-        except Exception:
-            return []
-        local = []
-        seen: set[int] = set()
-        for r in rows:
-            sid = r._mapping["id"]
-            if sid in seen:
-                continue
-            seen.add(sid)
-            variant = r._mapping.get("variant_text", "")
-            score = 0.82 + _prefix_bonus(qc, normalize_compact(variant))
-            resp = StreetAutocompleteResponse(
-                street_id=sid,
-                name=r._mapping["name"],
-                city=r._mapping["city"],
-                postal_code=r._mapping.get("postal_code"),
-                latitude=r._mapping["latitude"],
-                longitude=r._mapping["longitude"],
-                match_score=score,
-            )
-            if latitude is not None and longitude is not None:
-                d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
-                resp.distance_km = round(d, 2)
-            local.append((resp, score, sid))
-        return local
-
     # Run retrieval stages with early exit optimization
     # Fast stages first, skip slow stages if we have enough results
 
@@ -1190,9 +1144,6 @@ async def autocomplete(
         stage_c = await sql_typos()
         stage_e = await broad_prefix_fallback()
 
-    # Stage TTS: always run – cheap indexed lookup against the variants table
-    stage_tts = await tts_variant_search()
-
     flat: list[tuple[StreetAutocompleteResponse, float, int]] = [
         *stage_a,
         *stage_b,
@@ -1201,7 +1152,6 @@ async def autocomplete(
         *stage_f,
         *stage_c,
         *stage_e,
-        *stage_tts,
     ]
 
 
@@ -1389,31 +1339,6 @@ async def validate_address(
             res2 = await db.execute(stmt2.limit(60))
             streets = res2.scalars().all()
     
-    # TTS variant lookup: always run and merge into street candidates
-    variant_norm_prefix = normalize_compact(street_name).lower() + "%"
-    variant_sql = text("""
-        SELECT DISTINCT s.id
-        FROM street_name_variants v
-        JOIN streets s ON s.name = v.original_name
-        WHERE LOWER(v.normalized_variant) LIKE :prefix
-        LIMIT 60
-    """)
-    try:
-        variant_rows = (await db.execute(variant_sql, {"prefix": variant_norm_prefix})).fetchall()
-        if variant_rows:
-            ids = [r._mapping["id"] for r in variant_rows]
-            stmt_v = select(Street).where(Street.id.in_(ids))
-            if city_norm and city_variations:
-                city_conditions = [Street.city.ilike(f"{var}%") for var in city_variations]
-                stmt_v = stmt_v.where(or_(*city_conditions))
-            res_v = await db.execute(stmt_v)
-            variant_streets = res_v.scalars().all()
-            # Merge: add variant hits not already in streets
-            existing_ids = {int(getattr(st, "id")) for st in streets}
-            streets = list(streets) + [st for st in variant_streets if int(getattr(st, "id")) not in existing_ids]
-    except Exception:
-        pass
-
     # If city filter was provided, filter streets by normalized city name for better matching
     if city_norm and streets:
         filtered_streets = []
@@ -1801,30 +1726,6 @@ async def validate_address_voice(
         else:
             res2 = await db.execute(stmt2.limit(60))
             streets = res2.scalars().all()
-
-    # TTS variant lookup
-    variant_norm_prefix = normalize_compact(street_name).lower() + "%"
-    variant_sql = text("""
-        SELECT DISTINCT s.id
-        FROM street_name_variants v
-        JOIN streets s ON s.name = v.original_name
-        WHERE LOWER(v.normalized_variant) LIKE :prefix
-        LIMIT 60
-    """)
-    try:
-        variant_rows = (await db.execute(variant_sql, {"prefix": variant_norm_prefix})).fetchall()
-        if variant_rows:
-            ids = [r._mapping["id"] for r in variant_rows]
-            stmt_v = select(Street).where(Street.id.in_(ids))
-            if city_norm and city_variations:
-                city_conditions = [Street.city.ilike(f"{var}%") for var in city_variations]
-                stmt_v = stmt_v.where(or_(*city_conditions))
-            res_v = await db.execute(stmt_v)
-            variant_streets = res_v.scalars().all()
-            existing_ids = {int(getattr(st, "id")) for st in streets}
-            streets = list(streets) + [st for st in variant_streets if int(getattr(st, "id")) not in existing_ids]
-    except Exception:
-        pass
 
     # City filter + distance sort (same as /validate)
     if city_norm and streets:
