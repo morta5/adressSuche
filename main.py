@@ -19,7 +19,7 @@ from phonetic import phonetic_match_score, phonetic_forms
 from bktree import levenshtein_distance
 
 from database import get_async_db, init_db
-from models import Street, Address
+from models import Street, Address, StreetNameVariant
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1022,6 +1022,52 @@ async def autocomplete(
         local.sort(key=lambda t: (-t[1], t[0].name))
         return local[: max(limit * 2, 20)]
 
+    # Stage TTS: Search TTS-derived phonetic variants table
+    async def tts_variant_search() -> list[tuple[StreetAutocompleteResponse, float, int]]:
+        """Query street_name_variants for TTS/Voxtral-derived alternative spellings."""
+        if len(qc) < 2:
+            return []
+        qc_prefix = qc.lower()
+        params: Dict[str, Any] = {"prefix": f"{qc_prefix}%", "limit": max(limit * 4, 40)}
+        sql_parts = [
+            "SELECT s.id, s.name, s.city, s.postal_code, s.latitude, s.longitude,",
+            "       v.variant_text",
+            "FROM street_name_variants v",
+            "JOIN streets s ON s.name = v.original_name",
+            "WHERE LOWER(v.normalized_variant) LIKE :prefix",
+        ]
+        if city:
+            sql_parts.append("AND LOWER(s.city) LIKE :city")
+            params["city"] = f"{city.lower()}%"
+        sql_parts.append("LIMIT :limit")
+        try:
+            rows = (await db.execute(text("\n".join(sql_parts)), params)).fetchall()
+        except Exception:
+            return []
+        local = []
+        seen: set[int] = set()
+        for r in rows:
+            sid = r._mapping["id"]
+            if sid in seen:
+                continue
+            seen.add(sid)
+            variant = r._mapping.get("variant_text", "")
+            score = 0.82 + _prefix_bonus(qc, normalize_compact(variant))
+            resp = StreetAutocompleteResponse(
+                street_id=sid,
+                name=r._mapping["name"],
+                city=r._mapping["city"],
+                postal_code=r._mapping.get("postal_code"),
+                latitude=r._mapping["latitude"],
+                longitude=r._mapping["longitude"],
+                match_score=score,
+            )
+            if latitude is not None and longitude is not None:
+                d = haversine_distance(latitude, longitude, resp.latitude, resp.longitude)
+                resp.distance_km = round(d, 2)
+            local.append((resp, score, sid))
+        return local
+
     # Run retrieval stages with early exit optimization
     # Fast stages first, skip slow stages if we have enough results
 
@@ -1144,6 +1190,9 @@ async def autocomplete(
         stage_c = await sql_typos()
         stage_e = await broad_prefix_fallback()
 
+    # Stage TTS: always run – cheap indexed lookup against the variants table
+    stage_tts = await tts_variant_search()
+
     flat: list[tuple[StreetAutocompleteResponse, float, int]] = [
         *stage_a,
         *stage_b,
@@ -1152,6 +1201,7 @@ async def autocomplete(
         *stage_f,
         *stage_c,
         *stage_e,
+        *stage_tts,
     ]
 
 
@@ -1339,6 +1389,31 @@ async def validate_address(
             res2 = await db.execute(stmt2.limit(60))
             streets = res2.scalars().all()
     
+    # TTS variant lookup: always run and merge into street candidates
+    variant_norm_prefix = normalize_compact(street_name).lower() + "%"
+    variant_sql = text("""
+        SELECT DISTINCT s.id
+        FROM street_name_variants v
+        JOIN streets s ON s.name = v.original_name
+        WHERE LOWER(v.normalized_variant) LIKE :prefix
+        LIMIT 60
+    """)
+    try:
+        variant_rows = (await db.execute(variant_sql, {"prefix": variant_norm_prefix})).fetchall()
+        if variant_rows:
+            ids = [r._mapping["id"] for r in variant_rows]
+            stmt_v = select(Street).where(Street.id.in_(ids))
+            if city_norm and city_variations:
+                city_conditions = [Street.city.ilike(f"{var}%") for var in city_variations]
+                stmt_v = stmt_v.where(or_(*city_conditions))
+            res_v = await db.execute(stmt_v)
+            variant_streets = res_v.scalars().all()
+            # Merge: add variant hits not already in streets
+            existing_ids = {int(getattr(st, "id")) for st in streets}
+            streets = list(streets) + [st for st in variant_streets if int(getattr(st, "id")) not in existing_ids]
+    except Exception:
+        pass
+
     # If city filter was provided, filter streets by normalized city name for better matching
     if city_norm and streets:
         filtered_streets = []
@@ -1556,6 +1631,353 @@ async def validate_address(
                 ),
                 2,
             )
+        return resp
+
+    return AddressValidationResponse(exists=False)
+
+
+# ── /validate_voice helpers ───────────────────────────────────────────────────
+
+import re as _re
+
+_VOICE_SUFFIX_RE = _re.compile(
+    r"\s*(straße|strasse|weg|platz|gasse|allee|ring|damm|hof|park|berg|"
+    r"steig|pfad|ufer|graben|zeile|chaussee|promenade|brücke|brucke|"
+    r"kirche|markt|tor|bad|feld|grund|hang|tal|wall|anger|plan|stieg|"
+    r"winkel|siedlung|anger|stieg)\s*$",
+    _re.IGNORECASE,
+)
+
+_VOICE_GEO_SCAN_RADIUS_KM = 20.0
+_VOICE_GEO_SCAN_MIN_SCORE = 0.65
+_VOICE_GEO_SCAN_LIMIT = 2000
+
+
+def _strip_voice_suffix(name: str) -> str:
+    """Remove trailing German street-type word for root-only phonetic comparison."""
+    return _VOICE_SUFFIX_RE.sub("", name).strip()
+
+
+async def _phonetic_geo_scan(
+    street_name: str,
+    lat: float,
+    lon: float,
+    city_norm: Optional[str],
+    city_variations: List[str],
+    db: AsyncSession,
+) -> List[Tuple[float, float, Any]]:
+    """Return (score, distance_km, Street) tuples for the best phonetic matches
+    within VOICE_GEO_SCAN_RADIUS_KM of the given coordinates.
+
+    Fetches geo-bounded streets whose name starts with the same letter as the
+    query (pre-filter: cuts candidates ~80%), then scores with the combined
+    German+Cologne phonetic metric in a thread so the async event loop is not
+    blocked.  Only candidates scoring >= _VOICE_GEO_SCAN_MIN_SCORE are returned,
+    sorted by score desc then distance asc.
+    """
+    min_lat, max_lat, min_lon, max_lon = await _geo_bounds(lat, lon, _VOICE_GEO_SCAN_RADIUS_KM)
+
+    # Pre-filter: same first letter as the query root (handles ~80% reduction).
+    query_root = _strip_voice_suffix(street_name)
+    first_letter = query_root[:1].upper() if query_root else ""
+
+    stmt = select(Street).where(
+        Street.latitude.between(min_lat, max_lat),
+        Street.longitude.between(min_lon, max_lon),
+    )
+    if first_letter:
+        stmt = stmt.where(Street.name.like(f"{first_letter}%"))
+    if city_norm and city_variations:
+        city_conditions = [Street.city.ilike(f"{v}%") for v in city_variations]
+        stmt = stmt.where(or_(*city_conditions))
+
+    res = await db.execute(stmt.limit(_VOICE_GEO_SCAN_LIMIT))
+    candidates = res.scalars().all()
+
+    if not candidates:
+        return []
+
+    # Scoring is CPU-bound; run in a thread to avoid blocking the event loop.
+    def _score_candidates():
+        results: List[Tuple[float, float, Any]] = []
+        for st in candidates:
+            candidate_root = _strip_voice_suffix(str(getattr(st, "name")))
+            score = phonetic_match_score(query_root, candidate_root)
+            if score >= _VOICE_GEO_SCAN_MIN_SCORE:
+                dist = haversine_distance(
+                    lat, lon,
+                    float(getattr(st, "latitude")),
+                    float(getattr(st, "longitude")),
+                )
+                results.append((score, dist, st))
+        results.sort(key=lambda x: (-x[0], x[1]))
+        return results
+
+    scored = await asyncio.to_thread(_score_candidates)
+
+    if scored:
+        logger.info(
+            "validate_voice: phonetic geo-scan found %d candidate(s) ≥%.2f "
+            "(from %d pre-filtered), best=%r score=%.3f dist=%.1fkm",
+            len(scored),
+            _VOICE_GEO_SCAN_MIN_SCORE,
+            len(candidates),
+            getattr(scored[0][2], "name"),
+            scored[0][0],
+            scored[0][1],
+        )
+    return scored
+
+
+@app.get("/validate_voice", response_model=AddressValidationResponse)
+async def validate_address_voice(
+    street_name: str = Query(..., description="Street name (may be a voice-transcription approximation)"),
+    house_number: str = Query(..., description="House number (use '0' for streets without house numbers)"),
+    city: Optional[str] = Query(None, description="City name"),
+    latitude: Optional[float] = Query(None, description="Latitude for geo-bias (strongly recommended)"),
+    longitude: Optional[float] = Query(None, description="Longitude for geo-bias (strongly recommended)"),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Like /validate but adds a phonetic geo-scan fallback for voice-recognition errors.
+
+    When the standard exact/prefix/phonetic-prefix stages all fail to find a
+    street, this endpoint fetches every street within ~20 km and scores each one
+    with a combined German + Cologne phonetic similarity metric.  The best
+    candidate above the 0.65 threshold is returned with match_type="phonetic_voice"
+    and a confidence score so callers can decide whether to confirm with the user.
+
+    Example: "Buschlederstraße 12" → finds "Boostedter Straße 12" with confidence ≈ 0.73
+    """
+    # ── Stage 1 & 2: delegate to the exact same logic as /validate ──────────
+    # We re-use the inner query logic (not a redirect) so we can inspect the result.
+    target_norm = normalize_string(street_name)
+    city_norm = normalize_city_for_matching(city) if city else None
+    city_variations = generate_city_variations(city) if city else []
+    is_no_house_number_request = house_number.strip() == "0"
+
+    stmt = select(Street).where(Street.normalized_search == target_norm)
+    if city_norm and city_variations:
+        city_conditions = [Street.city.ilike(f"{var}%") for var in city_variations]
+        stmt = stmt.where(or_(*city_conditions))
+
+    streets = []
+    if latitude is not None and longitude is not None:
+        # Voice endpoint: geo-bounds are strict — no fallback to global search.
+        # A miss here means the street is not nearby; Stage 3 will handle it.
+        min_lat, max_lat, min_lon, max_lon = await _geo_bounds(latitude, longitude, 50.0)
+        stmt_nearby = stmt.where(
+            Street.latitude.between(min_lat, max_lat),
+            Street.longitude.between(min_lon, max_lon),
+        )
+        res = await db.execute(stmt_nearby.limit(100))
+        streets = res.scalars().all()
+    else:
+        res = await db.execute(stmt.limit(30))
+        streets = res.scalars().all()
+
+    if not streets:
+        qg, qc_ph = phonetic_forms(street_name)
+        conditions = [
+            Street.name.ilike(f"{street_name}%"),
+            Street.normalized_name.ilike(f"{normalize_compact(street_name)}%"),
+        ]
+        if qg:
+            conditions.append(Street.phonetic_german.like(f"{qg[:max(1, len(qg) - 1)]}%"))
+        if qc_ph:
+            conditions.append(Street.phonetic_cologne.like(f"{qc_ph[:max(1, len(qc_ph) - 1)]}%"))
+        stmt2 = select(Street).where(or_(*conditions))
+        if city_norm and city_variations:
+            city_conditions = [Street.city.ilike(f"{var}%") for var in city_variations]
+            stmt2 = stmt2.where(or_(*city_conditions))
+        if latitude is not None and longitude is not None:
+            # Again: strict geo-bounds, no global fallback.
+            min_lat, max_lat, min_lon, max_lon = await _geo_bounds(latitude, longitude, 50.0)
+            stmt2_nearby = stmt2.where(
+                Street.latitude.between(min_lat, max_lat),
+                Street.longitude.between(min_lon, max_lon),
+            )
+            res2 = await db.execute(stmt2_nearby.limit(100))
+            streets = res2.scalars().all()
+        else:
+            res2 = await db.execute(stmt2.limit(60))
+            streets = res2.scalars().all()
+
+    # TTS variant lookup
+    variant_norm_prefix = normalize_compact(street_name).lower() + "%"
+    variant_sql = text("""
+        SELECT DISTINCT s.id
+        FROM street_name_variants v
+        JOIN streets s ON s.name = v.original_name
+        WHERE LOWER(v.normalized_variant) LIKE :prefix
+        LIMIT 60
+    """)
+    try:
+        variant_rows = (await db.execute(variant_sql, {"prefix": variant_norm_prefix})).fetchall()
+        if variant_rows:
+            ids = [r._mapping["id"] for r in variant_rows]
+            stmt_v = select(Street).where(Street.id.in_(ids))
+            if city_norm and city_variations:
+                city_conditions = [Street.city.ilike(f"{var}%") for var in city_variations]
+                stmt_v = stmt_v.where(or_(*city_conditions))
+            res_v = await db.execute(stmt_v)
+            variant_streets = res_v.scalars().all()
+            existing_ids = {int(getattr(st, "id")) for st in streets}
+            streets = list(streets) + [st for st in variant_streets if int(getattr(st, "id")) not in existing_ids]
+    except Exception:
+        pass
+
+    # City filter + distance sort (same as /validate)
+    if city_norm and streets:
+        filtered = [
+            st for st in streets
+            if normalize_city_for_matching(str(getattr(st, "city"))).startswith(city_norm)
+            or city_norm.startswith(normalize_city_for_matching(str(getattr(st, "city"))))
+        ]
+        if filtered:
+            streets = filtered
+
+    phonetic_voice_match = False
+    phonetic_score: Optional[float] = None
+
+    # ── Stage 3: phonetic geo-scan (voice fallback) ──────────────────────────
+    if not streets and latitude is not None and longitude is not None:
+        scan_results = await _phonetic_geo_scan(
+            street_name, latitude, longitude, city_norm, city_variations, db
+        )
+        if scan_results:
+            phonetic_voice_match = True
+            phonetic_score = scan_results[0][0]
+            streets = [x[2] for x in scan_results[:10]]
+
+    if latitude is not None and longitude is not None and streets:
+        streets = sorted(
+            streets,
+            key=lambda st: haversine_distance(
+                latitude, longitude,
+                float(getattr(st, "latitude")),
+                float(getattr(st, "longitude")),
+            ),
+        )
+
+    match_type = "phonetic_voice" if phonetic_voice_match else "exact"
+
+    # ── House number resolution (identical to /validate) ─────────────────────
+    if is_no_house_number_request:
+        if streets:
+            st = streets[0]
+            resp = AddressValidationResponse(
+                exists=True,
+                address_id=None,
+                street_name=str(getattr(st, "name")),
+                city=str(getattr(st, "city")),
+                postal_code=str(getattr(st, "postal_code")) if getattr(st, "postal_code") is not None else None,
+                house_number="0",
+                latitude=float(getattr(st, "latitude")),
+                longitude=float(getattr(st, "longitude")),
+                match_type=match_type,
+                confidence=phonetic_score,
+            )
+            if latitude is not None and longitude is not None:
+                resp.distance_km = round(haversine_distance(latitude, longitude, float(getattr(st, "latitude")), float(getattr(st, "longitude"))), 2)
+            return resp
+        return AddressValidationResponse(exists=False)
+
+    exact_matches = []
+    for st in streets:
+        a_stmt = select(Address).where(Address.street_id == st.id, Address.house_number == house_number)
+        ares = await db.execute(a_stmt)
+        for addr in ares.scalars().all():
+            exact_matches.append((st, addr))
+
+    if exact_matches:
+        if latitude is not None and longitude is not None:
+            exact_matches = sorted(
+                exact_matches,
+                key=lambda x: haversine_distance(latitude, longitude, float(getattr(x[1], "latitude")), float(getattr(x[1], "longitude"))),
+            )
+        st, addr = exact_matches[0]
+        resp = AddressValidationResponse(
+            exists=True,
+            address_id=int(getattr(addr, "id")),
+            street_name=str(getattr(st, "name")),
+            city=str(getattr(st, "city")),
+            postal_code=str(getattr(st, "postal_code")) if getattr(st, "postal_code") is not None else None,
+            house_number=str(getattr(addr, "house_number")),
+            latitude=float(getattr(addr, "latitude")),
+            longitude=float(getattr(addr, "longitude")),
+            match_type=match_type,
+            confidence=phonetic_score,
+        )
+        if latitude is not None and longitude is not None:
+            resp.distance_km = round(haversine_distance(latitude, longitude, float(getattr(addr, "latitude")), float(getattr(addr, "longitude"))), 2)
+        return resp
+
+    street_has_no_addresses = True
+    if streets:
+        for st in streets:
+            res = await db.execute(select(Address).where(Address.street_id == st.id).limit(1))
+            if res.scalars().first():
+                street_has_no_addresses = False
+                break
+
+    if street_has_no_addresses and streets:
+        st = streets[0]
+        resp = AddressValidationResponse(
+            exists=True,
+            address_id=None,
+            street_name=str(getattr(st, "name")),
+            city=str(getattr(st, "city")),
+            postal_code=str(getattr(st, "postal_code")) if getattr(st, "postal_code") is not None else None,
+            house_number="0",
+            latitude=float(getattr(st, "latitude")),
+            longitude=float(getattr(st, "longitude")),
+            match_type=match_type,
+            confidence=phonetic_score,
+        )
+        if latitude is not None and longitude is not None:
+            resp.distance_km = round(haversine_distance(latitude, longitude, float(getattr(st, "latitude")), float(getattr(st, "longitude"))), 2)
+        return resp
+
+    soft_matches = []
+    for st in streets:
+        all_hn_res = await db.execute(select(Address).where(Address.street_id == st.id))
+        all_addresses = all_hn_res.scalars().all()
+        if all_addresses:
+            available = [str(getattr(a, "house_number")) for a in all_addresses]
+            nearest_hn = find_nearest_house_number(house_number, available)
+            if nearest_hn:
+                for addr in all_addresses:
+                    if str(getattr(addr, "house_number")) == nearest_hn:
+                        soft_matches.append((st, addr))
+
+    if soft_matches:
+        target_num = parse_house_number(house_number)
+        if target_num is not None:
+            def _hn_dist(x):
+                n = parse_house_number(str(getattr(x[1], "house_number")))
+                return abs(target_num - n) if n is not None else 10_000_000
+            if latitude is not None and longitude is not None:
+                soft_matches = sorted(soft_matches, key=lambda x: (_hn_dist(x), haversine_distance(latitude, longitude, float(getattr(x[1], "latitude")), float(getattr(x[1], "longitude")))))
+            else:
+                soft_matches = sorted(soft_matches, key=_hn_dist)
+        elif latitude is not None and longitude is not None:
+            soft_matches = sorted(soft_matches, key=lambda x: haversine_distance(latitude, longitude, float(getattr(x[1], "latitude")), float(getattr(x[1], "longitude"))))
+
+        st, addr = soft_matches[0]
+        resp = AddressValidationResponse(
+            exists=True,
+            address_id=int(getattr(addr, "id")),
+            street_name=str(getattr(st, "name")),
+            city=str(getattr(st, "city")),
+            postal_code=str(getattr(st, "postal_code")) if getattr(st, "postal_code") is not None else None,
+            house_number=str(getattr(addr, "house_number")),
+            latitude=float(getattr(addr, "latitude")),
+            longitude=float(getattr(addr, "longitude")),
+            match_type=match_type,
+            confidence=phonetic_score,
+        )
+        if latitude is not None and longitude is not None:
+            resp.distance_km = round(haversine_distance(latitude, longitude, float(getattr(addr, "latitude")), float(getattr(addr, "longitude"))), 2)
         return resp
 
     return AddressValidationResponse(exists=False)

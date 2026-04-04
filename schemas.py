@@ -33,3 +33,8 @@ class AddressValidationResponse(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     distance_km: Optional[float] = None
+    # Populated by /validate_voice when the match came from phonetic geo-scan
+    # rather than exact/prefix/phonetic-prefix lookup. Values: "exact", "phonetic_voice"
+    match_type: Optional[str] = None
+    # Phonetic similarity score [0.0–1.0] set when match_type="phonetic_voice"
+    confidence: Optional[float] = None
