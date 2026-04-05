@@ -1365,8 +1365,27 @@ async def validate_address(
     # Handle house_number "0" request - return street without house number
     if is_no_house_number_request:
         if streets:
-            # Pick the closest street if lat/lng provided
+            # streets is already sorted by street centroid distance. Pick the
+            # nearest street, but use the nearest address on that street (not
+            # the centroid) so the returned lat/lon is more precise.
             st = streets[0]
+            result_lat = float(getattr(st, "latitude"))
+            result_lon = float(getattr(st, "longitude"))
+            if latitude is not None and longitude is not None:
+                # Try to find the nearest actual address on this street
+                all_addr_res = await db.execute(select(Address).where(Address.street_id == st.id))
+                all_addrs = all_addr_res.scalars().all()
+                if all_addrs:
+                    nearest_addr = min(
+                        all_addrs,
+                        key=lambda a: haversine_distance(
+                            latitude, longitude,
+                            float(getattr(a, "latitude")),
+                            float(getattr(a, "longitude")),
+                        ),
+                    )
+                    result_lat = float(getattr(nearest_addr, "latitude"))
+                    result_lon = float(getattr(nearest_addr, "longitude"))
             resp = AddressValidationResponse(
                 exists=True,
                 address_id=None,
@@ -1376,17 +1395,12 @@ async def validate_address(
                 if getattr(st, "postal_code") is not None
                 else None,
                 house_number="0",
-                latitude=float(getattr(st, "latitude")),
-                longitude=float(getattr(st, "longitude")),
+                latitude=result_lat,
+                longitude=result_lon,
             )
             if latitude is not None and longitude is not None:
                 resp.distance_km = round(
-                    haversine_distance(
-                        float(latitude),
-                        float(longitude),
-                        float(getattr(st, "latitude")),
-                        float(getattr(st, "longitude")),
-                    ),
+                    haversine_distance(float(latitude), float(longitude), result_lat, result_lon),
                     2,
                 )
             return resp
@@ -1500,38 +1514,30 @@ async def validate_address(
     
     # If we have soft matches, pick the closest one if lat/lng provided
     if soft_matches:
-        # Prefer numerically closest house number to the requested one
         target_num = parse_house_number(house_number)
-        if target_num is not None:
-            def _hn_distance(x: tuple[Street, Address]) -> int:
-                hn_num = parse_house_number(str(getattr(x[1], "house_number")))
-                return abs(target_num - hn_num) if hn_num is not None else 10_000_000
 
-            if latitude is not None and longitude is not None:
-                soft_matches = sorted(
-                    soft_matches,
-                    key=lambda x: (
-                        _hn_distance(x),
-                        haversine_distance(
-                            latitude, longitude,
-                            float(getattr(x[1], "latitude")),
-                            float(getattr(x[1], "longitude"))
-                        ),
-                    ),
-                )
-            else:
-                soft_matches = sorted(soft_matches, key=_hn_distance)
-        else:
-            # Fallback: prefer geographic proximity when available
-            if latitude is not None and longitude is not None:
-                soft_matches = sorted(
-                    soft_matches,
-                    key=lambda x: haversine_distance(
+        def _hn_distance(x: tuple) -> int:
+            if target_num is None:
+                return 0
+            hn_num = parse_house_number(str(getattr(x[1], "house_number")))
+            return abs(target_num - hn_num) if hn_num is not None else 10_000_000
+
+        if latitude is not None and longitude is not None:
+            # Geo distance is always the primary key — a nearby street with a
+            # slightly wrong house number beats a far-away street with the exact one.
+            soft_matches = sorted(
+                soft_matches,
+                key=lambda x: (
+                    haversine_distance(
                         latitude, longitude,
                         float(getattr(x[1], "latitude")),
                         float(getattr(x[1], "longitude"))
-                    )
-                )
+                    ),
+                    _hn_distance(x),
+                ),
+            )
+        else:
+            soft_matches = sorted(soft_matches, key=_hn_distance)
 
         st, addr = soft_matches[0]
         resp = AddressValidationResponse(
