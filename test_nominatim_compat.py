@@ -2,9 +2,26 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import httpx
+import json
+from urllib.parse import urlencode
 import pytest
 import main
+
+
+async def route_request(query):
+    messages = []
+    async def receive():
+        return {'type':'http.request', 'body':b'', 'more_body':False}
+    async def send(message):
+        messages.append(message)
+    scope = {'type':'http','asgi':{'version':'3.0'},'http_version':'1.1',
+             'method':'GET','scheme':'http','path':'/nominatim/search',
+             'raw_path':b'/nominatim/search','query_string':urlencode(query).encode(),
+             'headers':[],'server':('fixture',80),'client':('127.0.0.1',1234),'root_path':''}
+    await main.app(scope, receive, send)
+    status = next(item['status'] for item in messages if item['type'] == 'http.response.start')
+    body = b''.join(item.get('body', b'') for item in messages if item['type'] == 'http.response.body')
+    return SimpleNamespace(status_code=status, json=lambda: json.loads(body))
 
 
 @pytest.mark.asyncio
@@ -14,8 +31,7 @@ async def test_nominatim_suche_validiert_hausnummer_und_stadt(monkeypatch):
     previous = dict(main.app.dependency_overrides)
     main.app.dependency_overrides[main.get_async_db] = lambda: None
     try:
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://fixture") as client:
-            response = await client.get("/nominatim/search", params={"q":"Stagingallee 1, 00000 Teststadt", "format":"json", "limit":1})
+        response = await route_request({"q":"Stagingallee 1, 00000 Teststadt", "format":"json", "limit":1})
         assert response.status_code == 200
         data = response.json()
         assert data[0]["lat"] == "54.0" and data[0]["lon"] == "10.0"
@@ -40,8 +56,7 @@ async def test_nominatim_unbekannte_adresse_und_ungueltige_parameter(monkeypatch
     previous = dict(main.app.dependency_overrides)
     main.app.dependency_overrides[main.get_async_db] = lambda: None
     try:
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://fixture') as client:
-            response = await client.get('/nominatim/search', params=query)
+        response = await route_request(query)
         assert response.status_code == expected_status
         if expected_status == 200:
             assert response.json() == []
