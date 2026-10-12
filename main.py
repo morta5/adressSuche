@@ -2204,6 +2204,26 @@ async def photon_reverse(lat: float = Query(..., ge=-90, le=90),
     return {"type": "FeatureCollection", "features": [photon_feature(result)] if result.exists else []}
 
 
+@app.get("/nominatim/search")
+async def nominatim_search(q: str = Query(..., min_length=1, max_length=512),
+    response_format: str = Query("json", alias="format", pattern="^json(v2)?$"),
+    limit: int = Query(1, ge=1, le=100), db: AsyncSession = Depends(get_async_db)):
+    """Den benötigten Backend-Suchvertrag aus denselben lokalen Adressen bedienen."""
+    parts = [part.strip() for part in q.split(",")]
+    match = _re.fullmatch(r"(.+?)\s+(\d[\w/-]*)", parts[0])
+    if match:
+        city = _re.sub(r"^\d{5}\s+", "", parts[1]) if len(parts) > 1 else None
+        result = await validate_address(street_name=match.group(1), house_number=match.group(2),
+            city=city, latitude=None, longitude=None, db=db)
+        if not result.exists or result.latitude is None or result.longitude is None:
+            return []
+        return [{"lat": str(result.latitude), "lon": str(result.longitude), "display_name": q}]
+    results = await autocomplete(query=parts[0], city=None, latitude=None, longitude=None, limit=limit, db=db)
+    data = [result.model_dump() if hasattr(result, "model_dump") else result for result in results]
+    return [{"lat": str(row["latitude"]), "lon": str(row["longitude"]), "display_name": row.get("name", q)}
+            for row in data if row.get("latitude") is not None and row.get("longitude") is not None]
+
+
 if __name__ == "__main__":
     import uvicorn
 

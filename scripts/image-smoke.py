@@ -7,6 +7,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 
 
 def main():
@@ -43,6 +44,10 @@ def main():
         with urllib.request.urlopen('http://' + address + '/photon/reverse?lat=54&lon=10', timeout=5) as response:
             feature = json.load(response)['features'][0]
             assert feature['properties']['street'] == 'Stagingallee'
+        query = urllib.parse.urlencode({'q':'Stagingallee 1, 00000 Teststadt', 'format':'json', 'limit':1})
+        with urllib.request.urlopen('http://' + address + '/nominatim/search?' + query, timeout=5) as response:
+            found = json.load(response)
+            assert found and float(found[0]['lat']) == 54.0 and float(found[0]['lon']) == 10.0
         assert subprocess.check_output(['docker', 'exec', name, 'id', '-u'], text=True).strip() != '0'
         print('Adress-Image: Migration wiederholbar, synthetische Suche und unprivilegierter Start bestätigt')
     finally:
