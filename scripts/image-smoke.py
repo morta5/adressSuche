@@ -37,6 +37,12 @@ def main():
         with urllib.request.urlopen('http://' + address + '/autocomplete?query=Stagingallee&limit=5', timeout=5) as response:
             data = json.load(response)
             assert data and data[0]['name'] == 'Stagingallee', 'Synthetische Adresse nicht gefunden'
+        with urllib.request.urlopen('http://' + address + '/photon/api/?q=Stagingallee&limit=5', timeout=5) as response:
+            feature = json.load(response)['features'][0]
+            assert feature['geometry']['coordinates'] == [10.0, 54.0]
+        with urllib.request.urlopen('http://' + address + '/photon/reverse?lat=54&lon=10', timeout=5) as response:
+            feature = json.load(response)['features'][0]
+            assert feature['properties']['street'] == 'Stagingallee'
         assert subprocess.check_output(['docker', 'exec', name, 'id', '-u'], text=True).strip() != '0'
         print('Adress-Image: Migration wiederholbar, synthetische Suche und unprivilegierter Start bestätigt')
     finally:

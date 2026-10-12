@@ -2177,6 +2177,33 @@ def _to_response(
     return resp
 
 
+def photon_feature(result):
+    """Bestehenden Kundenkarten GeoJSON liefern; keine zweite Suchlogik."""
+    data = result.model_dump() if hasattr(result, "model_dump") else result
+    name = data.get("name", data.get("street_name", ""))
+    return {"type": "Feature", "geometry": {"type": "Point",
+        "coordinates": [data["longitude"], data["latitude"]]},
+        "properties": {"osm_id": data.get("street_id", data.get("address_id", 0)),
+            "name": name, "street": name, "city": data.get("city"),
+            "postcode": data.get("postal_code"), "housenumber": data.get("house_number"),
+            "country": "Deutschland", "countrycode": "DE"}}
+
+
+@app.get("/photon/api/")
+async def photon_autocomplete(q: str = Query(..., min_length=1, max_length=256),
+    limit: int = Query(10, ge=1, le=100), lat: Optional[float] = Query(None),
+    lon: Optional[float] = Query(None), db: AsyncSession = Depends(get_async_db)):
+    results = await autocomplete(query=q, city=None, latitude=lat, longitude=lon, limit=limit, db=db)
+    return {"type": "FeatureCollection", "features": [photon_feature(row) for row in results]}
+
+
+@app.get("/photon/reverse")
+async def photon_reverse(lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180), db: AsyncSession = Depends(get_async_db)):
+    result = await reverse_geocode(latitude=lat, longitude=lon, max_distance_km=None, db=db)
+    return {"type": "FeatureCollection", "features": [photon_feature(result)] if result.exists else []}
+
+
 if __name__ == "__main__":
     import uvicorn
 

@@ -25,3 +25,10 @@ Offen: umfassende regionale Daten, Ranking-/Sprachfälle gegen vorbereitete
 Datensätze und der Gesamtstack-Nachweis im Cluster. Vorhandene manuelle
 Diagnoseskripte gegen lokale beziehungsweise echte Daten sind damit nicht
 als automatisiert bestanden erklärt.
+
+Die Kundenkarten verwenden Photon-GeoJSON. Die zusätzlichen
+`/photon/api/`- und `/photon/reverse`-Routen reichen deshalb an dieselbe
+Such-/Reverse-Logik weiter, statt einen zweiten Suchdienst zu betreiben.
+Der GeoJSON-Test war zunächst rot; zwölf Fälle und beide realen
+Kompatibilitätsrouten im gescannten Image sind grün. Die Länge steht
+wie von GeoJSON erwartet vor der Breite.

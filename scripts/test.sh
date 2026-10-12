@@ -7,4 +7,4 @@ mode="${1:---full}"
 py="${PYTHON:-python3}"
 "$py" -c 'import pytest, fastapi, sqlalchemy, shapely, aiosqlite' || exit 3
 export PYTHONDONTWRITEBYTECODE=1
-"$py" -m pytest test_utils_house_number.py test_staging_schema.py -q -p no:cacheprovider
+"$py" -m pytest test_utils_house_number.py test_staging_schema.py test_photon_compat.py -q -p no:cacheprovider
