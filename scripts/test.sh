@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Kurzlebige Parser-Fixtures, keine Abfrage der laufenden Adressdatenbank.
+# Hausnummern- und kontrollierte Staging-Startprüfungen; kein externer Datendienst.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-case "${1:---full}" in --fast|--full) ;; *) exit 2 ;; esac
-"${PYTHON:-python3}" -m pytest test_utils_house_number.py -q -p no:cacheprovider
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+mode="${1:---full}"
+[[ "$mode" == --fast || "$mode" == --full ]] || exit 2
+py="${PYTHON:-python3}"
+"$py" -c 'import pytest, fastapi, sqlalchemy, shapely, aiosqlite' || exit 3
+export PYTHONDONTWRITEBYTECODE=1
+"$py" -m pytest test_utils_house_number.py test_staging_schema.py -q -p no:cacheprovider

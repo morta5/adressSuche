@@ -369,7 +369,11 @@ if SERVE_FRONTEND and frontend_path.exists():
 
 @app.on_event("startup")
 async def _on_startup():
-    init_db()
+    auto_migrate = os.environ.get("ADDRESS_AUTO_MIGRATE", "1")
+    if auto_migrate not in {"0", "1"}:
+        raise ValueError("ADDRESS_AUTO_MIGRATE muss 0 oder 1 sein")
+    if auto_migrate == "1":
+        init_db()
 
 
 @app.get("/")

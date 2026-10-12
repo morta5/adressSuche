@@ -1,0 +1,26 @@
+FROM python:3.13-slim AS builder
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt spellfix.c ./
+RUN python -m pip install --no-cache-dir --prefix=/pkg -r requirements.txt \
+    && gcc -fPIC -shared spellfix.c -o spellfix.so
+
+FROM cgr.dev/chainguard/wolfi-base:latest
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/pkg/lib/python3.13/site-packages:/app PATH=/pkg/bin:$PATH \
+    DATABASE_URL=sqlite:////data/autocomplete.db \
+    ASYNC_DATABASE_URL=sqlite+aiosqlite:////data/autocomplete.db
+RUN apk add --no-cache python-3.13 sqlite-libs libstdc++ \
+    && mkdir -p /usr/local/bin /data \
+    && ln -s /usr/bin/python3.13 /usr/local/bin/python \
+    && addgroup -g 10001 appuser && adduser -D -u 10001 -G appuser appuser \
+    && chown 10001:10001 /data
+WORKDIR /app
+COPY --from=builder /pkg /pkg
+COPY --from=builder /build/spellfix.so /app/spellfix.so
+COPY --chown=10001:10001 . .
+USER 10001:10001
+EXPOSE 8001
+# Daten werden vor dem Start versioniert vorbereitet; kein fremder Download im API-Start.
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
