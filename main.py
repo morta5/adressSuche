@@ -369,7 +369,11 @@ if SERVE_FRONTEND and frontend_path.exists():
 
 @app.on_event("startup")
 async def _on_startup():
-    init_db()
+    auto_migrate = os.environ.get("ADDRESS_AUTO_MIGRATE", "1")
+    if auto_migrate not in {"0", "1"}:
+        raise ValueError("ADDRESS_AUTO_MIGRATE muss 0 oder 1 sein")
+    if auto_migrate == "1":
+        init_db()
 
 
 @app.get("/")
@@ -2171,6 +2175,53 @@ def _to_response(
         d = haversine_distance(lat, lon, float(latitude), float(longitude))
         resp.distance_km = round(d, 2)
     return resp
+
+
+def photon_feature(result):
+    """Bestehenden Kundenkarten GeoJSON liefern; keine zweite Suchlogik."""
+    data = result.model_dump() if hasattr(result, "model_dump") else result
+    name = data.get("name", data.get("street_name", ""))
+    return {"type": "Feature", "geometry": {"type": "Point",
+        "coordinates": [data["longitude"], data["latitude"]]},
+        "properties": {"osm_id": data.get("street_id", data.get("address_id", 0)),
+            "name": name, "street": name, "city": data.get("city"),
+            "postcode": data.get("postal_code"), "housenumber": data.get("house_number"),
+            "country": "Deutschland", "countrycode": "DE"}}
+
+
+@app.get("/photon/api/")
+async def photon_autocomplete(q: str = Query(..., min_length=1, max_length=256),
+    limit: int = Query(10, ge=1, le=100), lat: Optional[float] = Query(None),
+    lon: Optional[float] = Query(None), db: AsyncSession = Depends(get_async_db)):
+    results = await autocomplete(query=q, city=None, latitude=lat, longitude=lon, limit=limit, db=db)
+    return {"type": "FeatureCollection", "features": [photon_feature(row) for row in results]}
+
+
+@app.get("/photon/reverse")
+async def photon_reverse(lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180), db: AsyncSession = Depends(get_async_db)):
+    result = await reverse_geocode(latitude=lat, longitude=lon, max_distance_km=None, db=db)
+    return {"type": "FeatureCollection", "features": [photon_feature(result)] if result.exists else []}
+
+
+@app.get("/nominatim/search")
+async def nominatim_search(q: str = Query(..., min_length=1, max_length=512),
+    response_format: str = Query("json", alias="format", pattern="^json(v2)?$"),
+    limit: int = Query(1, ge=1, le=100), db: AsyncSession = Depends(get_async_db)):
+    """Den benötigten Backend-Suchvertrag aus denselben lokalen Adressen bedienen."""
+    parts = [part.strip() for part in q.split(",")]
+    match = _re.fullmatch(r"(.+?)\s+(\d[\w/-]*)", parts[0])
+    if match:
+        city = _re.sub(r"^\d{5}\s+", "", parts[1]) if len(parts) > 1 else None
+        result = await validate_address(street_name=match.group(1), house_number=match.group(2),
+            city=city, latitude=None, longitude=None, db=db)
+        if not result.exists or result.latitude is None or result.longitude is None:
+            return []
+        return [{"lat": str(result.latitude), "lon": str(result.longitude), "display_name": q}]
+    results = await autocomplete(query=parts[0], city=None, latitude=None, longitude=None, limit=limit, db=db)
+    data = [result.model_dump() if hasattr(result, "model_dump") else result for result in results]
+    return [{"lat": str(row["latitude"]), "lon": str(row["longitude"]), "display_name": row.get("name", q)}
+            for row in data if row.get("latitude") is not None and row.get("longitude") is not None]
 
 
 if __name__ == "__main__":

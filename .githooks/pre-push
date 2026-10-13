@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Vor jedem Push: die vollständigen Tests dieses Repositories (scripts/test.sh).
+# Ablauf und Begründung: docs/TESTEN.md
+set -uo pipefail
+root="$(git rev-parse --show-toplevel)"
+cd "$root" || exit 1
+# Git schreibt die zu pushenden Referenzen auf stdin; sie müssen sofort gelesen werden (sonst bricht git bei langen Tests mit SIGPIPE ab).
+refs="$(cat)"
+# Git-LFS (core.hooksPath ersetzt .git/hooks, daher hier nachgebaut): erst die LFS-Objekte hochladen.
+if grep -qs 'filter=lfs' .gitattributes && command -v git-lfs >/dev/null 2>&1; then
+  printf '%s\n' "$refs" | git lfs pre-push "$@" || exit $?
+fi
+# Wurde genau dieser Stand schon vollständig und grün getestet (scripts/test.sh / scripts/test-docker.sh), entfällt der Lauf.
+# Wichtig bei langen Suiten: eine Verbindung zum Server bleibt während des Hooks offen und kann ablaufen.
+gd="$(git rev-parse --git-dir)"
+stamp="$(git rev-parse HEAD)-$(git status --porcelain -uall | sha256sum | cut -c1-16)"
+if [[ -f "$gd/full-test-ok" && "$(cat "$gd/full-test-ok")" == "$stamp" ]]; then
+  echo "pre-push: dieser Stand wurde bereits vollständig und grün getestet – kein erneuter Lauf"; exit 0
+fi
+[[ -x scripts/test.sh ]] || { echo "pre-push: scripts/test.sh fehlt – keine Tests ausgeführt" >&2; exit 1; }
+# Läuft auf dem Rechner; fehlt dort Werkzeug (Exit 3), wechselt der Hook in die Docker-Testumgebung.
+# TEST_RUNNER=docker erzwingt Docker, TEST_RUNNER=native verbietet den Wechsel.
+MODE_ARG="--full"
+if [[ "${TEST_RUNNER:-auto}" == docker ]]; then exec scripts/test-docker.sh "$MODE_ARG"; fi
+scripts/test.sh "$MODE_ARG"; rc=$?
+if [[ $rc == 3 && "${TEST_RUNNER:-auto}" == auto ]] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  echo "Hook: Werkzeug fehlt – wechsle in die Docker-Testumgebung"
+  exec scripts/test-docker.sh "$MODE_ARG"
+fi
+exit $rc

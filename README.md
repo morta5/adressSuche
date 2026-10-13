@@ -470,3 +470,9 @@ Contributions are welcome! This is an open-source project.
 ---
 
 **Made with ❤️ for the open-source community**
+
+## Lokale Backend-Adresssuche im Staging
+
+`/nominatim/search` bedient den vom Dispatch-Backend verwendeten JSON-Suchvertrag aus den lokalen Adressen. Eine unbekannte Adresse liefert eine leere Liste. XML, überlange Suchtexte und ungültige Limits werden abgewiesen. Dies ist der benötigte Suchvertrag; weitere Nominatim-APIs werden nicht behauptet.
+
+Nachweis vom 12.10.2026: Fehlende Route zunächst rot, danach 17 Prüfungen grün; tatsächlich gebautes Image mit wiederholter Migration und synthetischer Suche grün, Trivy ohne HIGH-/CRITICAL-Befunde.

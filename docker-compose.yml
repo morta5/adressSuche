@@ -2,8 +2,8 @@ version: "3.9"
 services:
   autocomplete-v2:
     build:
-      context: ..
-      dockerfile: v2/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     image: autocomplete-v2:latest
     container_name: autocomplete-v2
     environment:
@@ -12,5 +12,8 @@ services:
     ports:
       - "8001:8001"
     volumes:
-      - ./v2:/data
+      - address-data:/data
     restart: unless-stopped
+
+volumes:
+  address-data:

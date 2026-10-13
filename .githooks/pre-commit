@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Vor jedem Commit: Geheimnis-Scan der gestagten Änderungen, danach die schnellen Tests (scripts/test.sh --fast).
+# Ablauf und Begründung: docs/TESTEN.md
+set -uo pipefail
+root="$(git rev-parse --show-toplevel)"
+cd "$root" || exit 1
+
+bad=0
+while IFS= read -r f; do
+  case "$f" in
+    *.jks|*.keystore|*.p12|*.pfx|*.pem|*.key|.env|*/.env|*.env|*service-account*.json|*firebase-adminsdk*.json|*google-services.json)
+      echo "pre-commit: '$f' sieht nach einem Geheimnis aus und wird nicht committet." >&2; bad=1 ;;
+  esac
+done < <(git diff --cached --name-only --diff-filter=AM)
+if git diff --cached -U0 | grep -E '^\+.*(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})' >/dev/null; then
+  echo "pre-commit: ein privater Schlüssel oder Zugangstoken steht im Diff." >&2; bad=1
+fi
+((bad)) && exit 1
+
+[[ -x scripts/test.sh ]] || { echo "pre-commit: scripts/test.sh fehlt – keine Tests ausgeführt" >&2; exit 1; }
+# Läuft auf dem Rechner; fehlt dort Werkzeug (Exit 3), wechselt der Hook in die Docker-Testumgebung.
+# TEST_RUNNER=docker erzwingt Docker, TEST_RUNNER=native verbietet den Wechsel.
+MODE_ARG="--fast"
+if [[ "${TEST_RUNNER:-auto}" == docker ]]; then exec scripts/test-docker.sh "$MODE_ARG"; fi
+scripts/test.sh "$MODE_ARG"; rc=$?
+if [[ $rc == 3 && "${TEST_RUNNER:-auto}" == auto ]] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  echo "Hook: Werkzeug fehlt – wechsle in die Docker-Testumgebung"
+  exec scripts/test-docker.sh "$MODE_ARG"
+fi
+exit $rc
