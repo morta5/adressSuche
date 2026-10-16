@@ -14,7 +14,7 @@ concurrency:
 jobs:
   checks:
     name: Tests und Build
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository || github.event_name == 'pull_request_target') && 'ubuntu-latest' || 'k8s-adresssuche' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
       dependencies: ${{ steps.dependencies.outputs.commits }}
@@ -63,7 +63,7 @@ jobs:
     name: Image prüfen und veröffentlichen
     needs: checks
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/staging'
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository || github.event_name == 'pull_request_target') && 'ubuntu-latest' || 'k8s-adresssuche' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
