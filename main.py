@@ -34,6 +34,7 @@ from utils import (
     consonant_key,
     point_to_segment_distance,
     find_nearest_house_number,
+    normalize_house_number,
     parse_house_number,
 )
 
@@ -1415,7 +1416,11 @@ async def validate_address(
     for st in streets:
         a_stmt = (
             select(Address)
-            .where(Address.street_id == st.id, Address.house_number == house_number)
+            .where(
+                Address.street_id == st.id,
+                # Gross-/Kleinschreibung und Leerzeichen ignorieren: "11A" findet "11a", "12a" findet "12A", "13b" findet "13 b".
+                func.lower(func.replace(Address.house_number, " ", "")) == normalize_house_number(house_number),
+            )
         )
         ares = await db.execute(a_stmt)
         addrs = ares.scalars().all()
@@ -1824,7 +1829,10 @@ async def validate_address_voice(
 
     exact_matches = []
     for st in streets:
-        a_stmt = select(Address).where(Address.street_id == st.id, Address.house_number == house_number)
+        a_stmt = select(Address).where(
+            Address.street_id == st.id,
+            func.lower(func.replace(Address.house_number, " ", "")) == normalize_house_number(house_number),
+        )
         ares = await db.execute(a_stmt)
         for addr in ares.scalars().all():
             exact_matches.append((st, addr))

@@ -627,6 +627,14 @@ def should_expand_suffix(query: str) -> bool:
     return any(query_lower.endswith(suffix) for suffix in partial_suffixes)
 
 
+def normalize_house_number(house_number: Optional[str]) -> str:
+    """Vergleichsform einer Hausnummer: ohne Leerraum, kleingeschrieben ("6 A" -> "6a"). "/" und "-" bleiben erhalten.
+
+    In den Daten stehen Nummern mit Buchstaben klein ("11a"), gross ("12A") und mit Leerzeichen ("13 b"); getippt wird beliebig.
+    """
+    return re.sub(r"\s+", "", house_number or "").lower()
+
+
 def parse_house_number(house_number: str) -> Optional[int]:
     """
     Extract the numeric part from a house number.
@@ -675,10 +683,14 @@ def find_nearest_house_number(target: str, available: List[str]) -> Optional[str
     if not target:
         return None
     
-    # First, check for exact match
+    # First, check for exact match (Gross-/Kleinschreibung und Leerzeichen sind egal)
     target_stripped = target.strip()
+    target_normal = normalize_house_number(target)
     for hn in available:
         if hn.strip() == target_stripped:
+            return hn
+    for hn in available:
+        if normalize_house_number(hn) == target_normal:
             return hn
     
     # Parse target number

@@ -43,3 +43,23 @@ class TestNearestHouseNumber:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+class TestSchreibweise:
+    """Hausnummern mit Buchstaben: Gross-/Kleinschreibung und Leerzeichen duerfen keinen Unterschied machen."""
+
+    @pytest.mark.parametrize("eingabe, erwartet", [("6a", "6a"), ("6A", "6a"), ("6 a", "6a"), (" 6 A ", "6a"), ("12-14", "12-14"), ("6/1", "6/1"), ("", "")])
+    def test_normalisieren(self, eingabe, erwartet):
+        from utils import normalize_house_number
+        assert normalize_house_number(eingabe) == erwartet
+
+    def test_grossbuchstabe_findet_die_kleingeschriebene_nummer(self):
+        assert find_nearest_house_number("11A", ["10", "11", "11a", "12"]) == "11a"
+
+    def test_kleinbuchstabe_findet_die_grossgeschriebene_nummer(self):
+        assert find_nearest_house_number("12a", ["12", "12A", "13"]) == "12A"
+
+    def test_leerzeichen_in_den_daten_stoert_nicht(self):
+        assert find_nearest_house_number("12a", ["12 a", "13"]) == "12 a"
+
+    def test_ohne_gleiche_nummer_bleibt_die_naehe(self):
+        assert find_nearest_house_number("50", ["48", "52"]) in {"48", "52"}
